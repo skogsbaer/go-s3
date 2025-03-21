@@ -1,13 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"log"
+	"strings"
+	"time"
 
 	"bufio"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/gofiber/fiber/v2"
 	"github.com/versity/versitygw/auth"
 	"github.com/versity/versitygw/metrics"
@@ -17,16 +25,47 @@ import (
 	"github.com/versity/versitygw/s3log"
 	"github.com/versity/versitygw/s3response"
 	"github.com/versity/versitygw/s3select"
+
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
 
+// S3 proxy implementation:
+// $HOME/go/pkg/mod/github.com/versity/versitygw@v1.0.11/backend/s3proxy/s3.go
 type MyBackend struct {
-	name string
+	name   string
+	client *s3.Client
 }
+
+const aclKey string = "pcsAclKey"
+
+var defTime = time.Time{}
 
 func (MyBackend) Shutdown() {
 	log.Printf("MyBackend.Shutdown")
 }
-func (self MyBackend) String() string {
+
+func handleError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var ae smithy.APIError
+	if errors.As(err, &ae) {
+		apiErr := s3err.APIError{
+			Code:        ae.ErrorCode(),
+			Description: ae.ErrorMessage(),
+		}
+		var re *awshttp.ResponseError
+		if errors.As(err, &re) {
+			apiErr.HTTPStatusCode = re.Response.StatusCode
+		}
+		return apiErr
+	}
+	return err
+}
+
+func (self *MyBackend) String() string {
 	return self.name
 }
 func (MyBackend) ListBuckets(ctx context.Context, input s3response.ListBucketsInput) (s3response.ListAllMyBucketsResult, error) {
@@ -38,15 +77,54 @@ func (MyBackend) HeadBucket(ctx context.Context, input *s3.HeadBucketInput) (*s3
 	// return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
 	return &s3.HeadBucketOutput{}, nil
 }
-func (MyBackend) GetBucketAcl(ctx context.Context, input *s3.GetBucketAclInput) ([]byte, error) {
+func (self *MyBackend) GetBucketAcl(
+	ctx context.Context,
+	input *s3.GetBucketAclInput,
+) ([]byte, error) {
 	log.Printf("MyBackend.GetBucketAcl(%v, %v)", ctx, input)
-	// return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
+	if input.ExpectedBucketOwner != nil && *input.ExpectedBucketOwner == "" {
+		input.ExpectedBucketOwner = nil
+	}
+
+	tagout, err := self.client.GetBucketTagging(ctx, &s3.GetBucketTaggingInput{
+		Bucket: input.Bucket,
+	})
+	if err != nil {
+		var ae smithy.APIError
+		if errors.As(err, &ae) {
+			// sdk issue workaround for missing NoSuchTagSet error type
+			// https://github.com/aws/aws-sdk-go-v2/issues/2878
+			if strings.Contains(ae.ErrorCode(), "NoSuchTagSet") {
+				return []byte{}, nil
+			}
+			if strings.Contains(ae.ErrorCode(), "NotImplemented") {
+				return []byte{}, nil
+			}
+		}
+		return nil, handleError(err)
+	}
+
+	for _, tag := range tagout.TagSet {
+		if *tag.Key == aclKey {
+			acl, err := Base64Decode(*tag.Value)
+			if err != nil {
+				return nil, handleError(err)
+			}
+			return acl, nil
+		}
+	}
+
 	return []byte{}, nil
 }
-func (MyBackend) CreateBucket(ctx context.Context, input *s3.CreateBucketInput, data []byte) error {
+
+func (self *MyBackend) CreateBucket(
+	ctx context.Context, input *s3.CreateBucketInput, data []byte,
+) error {
 	log.Printf("MyBackend.CreateBucket(%v, %v)", ctx, input)
-	return s3err.GetAPIError(s3err.ErrNotImplemented)
+	_, err := self.client.CreateBucket(ctx, input)
+	return handleError(err)
 }
+
 func (MyBackend) PutBucketAcl(ctx context.Context, bucket string, data []byte) error {
 	log.Printf("MyBackend.PutBucketAcl(%v, %v)", ctx, bucket)
 	return s3err.GetAPIError(s3err.ErrNotImplemented)
@@ -117,19 +195,252 @@ func (MyBackend) UploadPartCopy(ctx context.Context, input *s3.UploadPartCopyInp
 	return s3response.CopyPartResult{}, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
 
-func (MyBackend) PutObject(ctx context.Context, input *s3.PutObjectInput) (s3response.PutObjectOutput, error) {
-	log.Printf("MyBackend.PutObject(%v, %v)", ctx, input)
-	return s3response.PutObjectOutput{}, s3err.GetAPIError(s3err.ErrNotImplemented)
+func (self *MyBackend) PutObject(
+	ctx context.Context, input *s3.PutObjectInput,
+) (s3response.PutObjectOutput, error) {
+	if input.CacheControl != nil && *input.CacheControl == "" {
+		input.CacheControl = nil
+	}
+	if input.ChecksumCRC32 != nil && *input.ChecksumCRC32 == "" {
+		input.ChecksumCRC32 = nil
+	}
+	if input.ChecksumCRC32C != nil && *input.ChecksumCRC32C == "" {
+		input.ChecksumCRC32C = nil
+	}
+	if input.ChecksumCRC64NVME != nil && *input.ChecksumCRC64NVME == "" {
+		input.ChecksumCRC64NVME = nil
+	}
+	if input.ChecksumSHA1 != nil && *input.ChecksumSHA1 == "" {
+		input.ChecksumSHA1 = nil
+	}
+	if input.ChecksumSHA256 != nil && *input.ChecksumSHA256 == "" {
+		input.ChecksumSHA256 = nil
+	}
+	if input.ContentDisposition != nil && *input.ContentDisposition == "" {
+		input.ContentDisposition = nil
+	}
+	if input.ContentEncoding != nil && *input.ContentEncoding == "" {
+		input.ContentEncoding = nil
+	}
+	if input.ContentLanguage != nil && *input.ContentLanguage == "" {
+		input.ContentLanguage = nil
+	}
+	if input.ContentMD5 != nil && *input.ContentMD5 == "" {
+		input.ContentMD5 = nil
+	}
+	if input.ContentType != nil && *input.ContentType == "" {
+		input.ContentType = nil
+	}
+	if input.ExpectedBucketOwner != nil && *input.ExpectedBucketOwner == "" {
+		input.ExpectedBucketOwner = nil
+	}
+	if input.Expires != nil && *input.Expires == defTime {
+		input.Expires = nil
+	}
+	if input.GrantFullControl != nil && *input.GrantFullControl == "" {
+		input.GrantFullControl = nil
+	}
+	if input.GrantRead != nil && *input.GrantRead == "" {
+		input.GrantRead = nil
+	}
+	if input.GrantReadACP != nil && *input.GrantReadACP == "" {
+		input.GrantReadACP = nil
+	}
+	if input.GrantWriteACP != nil && *input.GrantWriteACP == "" {
+		input.GrantWriteACP = nil
+	}
+	if input.IfMatch != nil && *input.IfMatch == "" {
+		input.IfMatch = nil
+	}
+	if input.IfNoneMatch != nil && *input.IfNoneMatch == "" {
+		input.IfNoneMatch = nil
+	}
+	if input.SSECustomerAlgorithm != nil && *input.SSECustomerAlgorithm == "" {
+		input.SSECustomerAlgorithm = nil
+	}
+	if input.SSECustomerKey != nil && *input.SSECustomerKey == "" {
+		input.SSECustomerKey = nil
+	}
+	if input.SSECustomerKeyMD5 != nil && *input.SSECustomerKeyMD5 == "" {
+		input.SSECustomerKeyMD5 = nil
+	}
+	if input.SSEKMSEncryptionContext != nil && *input.SSEKMSEncryptionContext == "" {
+		input.SSEKMSEncryptionContext = nil
+	}
+	if input.SSEKMSKeyId != nil && *input.SSEKMSKeyId == "" {
+		input.SSEKMSKeyId = nil
+	}
+	if input.Tagging != nil && *input.Tagging == "" {
+		input.Tagging = nil
+	}
+	if input.WebsiteRedirectLocation != nil && *input.WebsiteRedirectLocation == "" {
+		input.WebsiteRedirectLocation = nil
+	}
+
+	// no object lock for backend
+	input.ObjectLockRetainUntilDate = nil
+	input.ObjectLockMode = ""
+	input.ObjectLockLegalHoldStatus = ""
+
+	log.Printf("MyBackend.PutObject(%v, %+v)", ctx, input)
+	origBody := input.Body
+	repetitions := 10
+	n := 0 // must be zero!!!
+	input.Body = PrependReader{
+		r:      origBody,
+		prefix: bytes.Repeat([]byte{60}, repetitions),
+		n:      &n,
+	}
+	newLen := *input.ContentLength + int64(repetitions)
+	input.ContentLength = &newLen
+	input.ContentMD5 = nil
+
+	output, err := self.client.PutObject(ctx, input, s3.WithAPIOptions(
+		v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware,
+	))
+	if err != nil {
+		log.Printf("S3 server returned error for PutObject: %v", err)
+		return s3response.PutObjectOutput{}, handleError(err)
+	}
+
+	var versionID string
+	if output.VersionId != nil {
+		versionID = *output.VersionId
+	}
+
+	return s3response.PutObjectOutput{
+		ETag:              *output.ETag,
+		VersionID:         versionID,
+		ChecksumCRC32:     output.ChecksumCRC32,
+		ChecksumCRC32C:    output.ChecksumCRC32C,
+		ChecksumCRC64NVME: output.ChecksumCRC64NVME,
+		ChecksumSHA1:      output.ChecksumSHA1,
+		ChecksumSHA256:    output.ChecksumSHA256,
+	}, nil
 }
-func (MyBackend) HeadObject(ctx context.Context, input *s3.HeadObjectInput) (*s3.HeadObjectOutput, error) {
+
+func (self *MyBackend) HeadObject(ctx context.Context, input *s3.HeadObjectInput) (*s3.HeadObjectOutput, error) {
 	log.Printf("MyBackend.HeadObject(%v, %v)", ctx, input)
-	// return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
-	return &s3.HeadObjectOutput{}, nil
+	if input.ExpectedBucketOwner != nil && *input.ExpectedBucketOwner == "" {
+		input.ExpectedBucketOwner = nil
+	}
+	if input.IfMatch != nil && *input.IfMatch == "" {
+		input.IfMatch = nil
+	}
+	if input.IfModifiedSince != nil && *input.IfModifiedSince == defTime {
+		input.IfModifiedSince = nil
+	}
+	if input.IfNoneMatch != nil && *input.IfNoneMatch == "" {
+		input.IfNoneMatch = nil
+	}
+	if input.IfUnmodifiedSince != nil && *input.IfUnmodifiedSince == defTime {
+		input.IfUnmodifiedSince = nil
+	}
+	if input.PartNumber != nil && *input.PartNumber == 0 {
+		input.PartNumber = nil
+	}
+	if input.Range != nil && *input.Range == "" {
+		input.Range = nil
+	}
+	if input.ResponseCacheControl != nil && *input.ResponseCacheControl == "" {
+		input.ResponseCacheControl = nil
+	}
+	if input.ResponseContentDisposition != nil && *input.ResponseContentDisposition == "" {
+		input.ResponseContentDisposition = nil
+	}
+	if input.ResponseContentEncoding != nil && *input.ResponseContentEncoding == "" {
+		input.ResponseContentEncoding = nil
+	}
+	if input.ResponseContentLanguage != nil && *input.ResponseContentLanguage == "" {
+		input.ResponseContentLanguage = nil
+	}
+	if input.ResponseContentType != nil && *input.ResponseContentType == "" {
+		input.ResponseContentType = nil
+	}
+	if input.ResponseExpires != nil && *input.ResponseExpires == defTime {
+		input.ResponseExpires = nil
+	}
+	if input.SSECustomerAlgorithm != nil && *input.SSECustomerAlgorithm == "" {
+		input.SSECustomerAlgorithm = nil
+	}
+	if input.SSECustomerKey != nil && *input.SSECustomerKey == "" {
+		input.SSECustomerKey = nil
+	}
+	if input.SSECustomerKeyMD5 != nil && *input.SSECustomerKeyMD5 == "" {
+		input.SSECustomerKeyMD5 = nil
+	}
+	if input.VersionId != nil && *input.VersionId == "" {
+		input.VersionId = nil
+	}
+
+	out, err := self.client.HeadObject(ctx, input)
+	return out, handleError(err)
 }
-func (MyBackend) GetObject(ctx context.Context, input *s3.GetObjectInput) (*s3.GetObjectOutput, error) {
+
+func (self *MyBackend) GetObject(ctx context.Context, input *s3.GetObjectInput) (*s3.GetObjectOutput, error) {
 	log.Printf("MyBackend.GetObject(%v, %v)", ctx, input)
-	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
+	if input.ExpectedBucketOwner != nil && *input.ExpectedBucketOwner == "" {
+		input.ExpectedBucketOwner = nil
+	}
+	if input.IfMatch != nil && *input.IfMatch == "" {
+		input.IfMatch = nil
+	}
+	if input.IfModifiedSince != nil && *input.IfModifiedSince == defTime {
+		input.IfModifiedSince = nil
+	}
+	if input.IfNoneMatch != nil && *input.IfNoneMatch == "" {
+		input.IfNoneMatch = nil
+	}
+	if input.IfUnmodifiedSince != nil && *input.IfUnmodifiedSince == defTime {
+		input.IfUnmodifiedSince = nil
+	}
+	if input.PartNumber != nil && *input.PartNumber == 0 {
+		input.PartNumber = nil
+	}
+	if input.Range != nil && *input.Range == "" {
+		input.Range = nil
+	}
+	if input.ResponseCacheControl != nil && *input.ResponseCacheControl == "" {
+		input.ResponseCacheControl = nil
+	}
+	if input.ResponseContentDisposition != nil && *input.ResponseContentDisposition == "" {
+		input.ResponseContentDisposition = nil
+	}
+	if input.ResponseContentEncoding != nil && *input.ResponseContentEncoding == "" {
+		input.ResponseContentEncoding = nil
+	}
+	if input.ResponseContentLanguage != nil && *input.ResponseContentLanguage == "" {
+		input.ResponseContentLanguage = nil
+	}
+	if input.ResponseContentType != nil && *input.ResponseContentType == "" {
+		input.ResponseContentType = nil
+	}
+	if input.ResponseExpires != nil && *input.ResponseExpires == defTime {
+		input.ResponseExpires = nil
+	}
+	if input.SSECustomerAlgorithm != nil && *input.SSECustomerAlgorithm == "" {
+		input.SSECustomerAlgorithm = nil
+	}
+	if input.SSECustomerKey != nil && *input.SSECustomerKey == "" {
+		input.SSECustomerKey = nil
+	}
+	if input.SSECustomerKeyMD5 != nil && *input.SSECustomerKeyMD5 == "" {
+		input.SSECustomerKeyMD5 = nil
+	}
+	if input.VersionId != nil && *input.VersionId == "" {
+		input.VersionId = nil
+	}
+
+	output, err := self.client.GetObject(ctx, input)
+	if err != nil {
+		return nil, handleError(err)
+	}
+
+	origBody := output.Body
+	output.Body = UpperCaseReader{r: origBody}
+	return output, nil
 }
+
 func (MyBackend) GetObjectAcl(ctx context.Context, input *s3.GetObjectAclInput) (*s3.GetObjectAclOutput, error) {
 	log.Printf("MyBackend.GetObjectAcl(%v, %v)", ctx, input)
 	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
@@ -142,11 +453,32 @@ func (MyBackend) CopyObject(ctx context.Context, input *s3.CopyObjectInput) (*s3
 	log.Printf("MyBackend.CopyObject(%v, %v)", ctx, input)
 	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
-func (MyBackend) ListObjects(ctx context.Context, input *s3.ListObjectsInput) (s3response.ListObjectsResult, error) {
+func (self *MyBackend) ListObjects(
+	ctx context.Context,
+	input *s3.ListObjectsInput,
+) (s3response.ListObjectsResult, error) {
 	log.Printf("MyBackend.ListObjects(%v, %v)", ctx, input)
-	// return s3response.ListObjectsResult{}, s3err.GetAPIError(s3err.ErrNotImplemented)
-	return s3response.ListObjectsResult{}, nil
+
+	out, err := self.client.ListObjects(ctx, input)
+	if err != nil {
+		return s3response.ListObjectsResult{}, handleError(err)
+	}
+
+	contents := ConvertObjects(out.Contents)
+
+	return s3response.ListObjectsResult{
+		CommonPrefixes: out.CommonPrefixes,
+		Contents:       contents,
+		Delimiter:      out.Delimiter,
+		IsTruncated:    out.IsTruncated,
+		Marker:         out.Marker,
+		MaxKeys:        out.MaxKeys,
+		Name:           out.Name,
+		NextMarker:     out.NextMarker,
+		Prefix:         out.Prefix,
+	}, nil
 }
+
 func (MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV2Input) (s3response.ListObjectsV2Result, error) {
 	log.Printf("MyBackend.ListObjectsV2(%v, %v)", ctx, input)
 	return s3response.ListObjectsV2Result{}, s3err.GetAPIError(s3err.ErrNotImplemented)
@@ -221,7 +553,7 @@ func (MyBackend) PutObjectLockConfiguration(ctx context.Context, bucket string, 
 }
 func (MyBackend) GetObjectLockConfiguration(ctx context.Context, bucket string) ([]byte, error) {
 	log.Printf("MyBackend.GetObjectLockConfiguration(%v, %v)", ctx, bucket)
-	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
+	return nil, s3err.GetAPIError(s3err.ErrObjectLockConfigurationNotFound)
 }
 func (MyBackend) PutObjectRetention(ctx context.Context, bucket, object, versionId string, bypass bool, retention []byte) error {
 	log.Printf("MyBackend.PutObjectRetention(%v, %v, %v)", ctx, bucket, object)
@@ -249,6 +581,41 @@ func (MyBackend) ListBucketsAndOwners(ctx context.Context) ([]s3response.Bucket,
 	return []s3response.Bucket{}, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
 
+// FIXME: remove deprecated API
+// createS3Client creates a new AWS S3 client with the provided credentials, region, and endpoint
+func createS3Client(accessKey, secretKey, region, endpoint string) (*s3.Client, error) {
+	// Create a custom credentials provider
+	credProvider := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
+
+	// Create custom endpoint resolver
+	customResolver := aws.EndpointResolverFunc(func(service, region string) (aws.Endpoint, error) {
+		if service == s3.ServiceID {
+			return aws.Endpoint{
+				URL:               endpoint,
+				SigningRegion:     region,
+				HostnameImmutable: true,
+			}, nil
+		}
+		// Fallback to default endpoint resolution
+		return aws.Endpoint{}, &aws.EndpointNotFoundError{}
+	})
+
+	// Load AWS configuration with custom credentials and endpoint resolver
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion(region),
+		config.WithCredentialsProvider(credProvider),
+		config.WithEndpointResolver(customResolver),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create and return the S3 client with custom options
+	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.UsePathStyle = true // Use path-style addressing
+	}), nil
+}
+
 func main() {
 	app := fiber.New(fiber.Config{
 		AppName:               "go-s3",
@@ -259,9 +626,26 @@ func main() {
 		DisableStartupMessage: false,
 	})
 
-	backend := &MyBackend{}
 	key := "testkey"
 	secret := "testsecret"
+	region := "us-east-1"
+	s3Key := "Q3AM3UQ867SPQQA43P2F"
+	s3Secret := "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG"
+	// Specify the S3 server endpoint
+	s3Endpoint := "https://play.min.io"
+
+	// Create the S3 client with the custom endpoint
+	s3Client, err := createS3Client(s3Key, s3Secret, region, s3Endpoint)
+	if err != nil {
+		log.Fatalf("Failed to create S3 client: %v", err)
+	}
+
+	// Initialize backend with the S3 client
+	backend := &MyBackend{
+		name:   "aws-s3-backend",
+		client: s3Client,
+	}
+
 	iam, err := auth.New(&auth.Opts{
 		RootAccount: auth.Account{
 			Access: key,

@@ -14,7 +14,7 @@ but only as dummy implementation.
 Just run the server via
 
 ```bash
-go run main.go
+go run .
 ```
 
 Server starts on `http://localhost:9000`
@@ -29,10 +29,10 @@ mc alias set local-s3 http://localhost:9000 testkey testsecret
 mc mb local-s3/mybucket
 
 # Upload File
-mc cp myfile.txt local-s3/mybucket/
+mc put myfile.txt local-s3/mybucket/
 
 # Download File
-mc cp local-s3/mybucket/myfile.txt ./
+mc get local-s3/mybucket/myfile.txt localfile
 
 # List Buckets
 mc ls local-s3
