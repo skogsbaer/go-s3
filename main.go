@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"bufio"
@@ -283,26 +283,66 @@ func (self *MyBackend) PutObject(
 	input.ObjectLockLegalHoldStatus = ""
 
 	log.Printf("MyBackend.PutObject(%v, %+v)", ctx, input)
-	origBody := input.Body
-	repetitions := 10
-	n := 0 // must be zero!!!
-	input.Body = PrependReader{
-		r:      origBody,
-		prefix: bytes.Repeat([]byte{60}, repetitions),
-		n:      &n,
+	// Define a splitter function that splits each chunk into outputs parts
+	splitter := func(chunk []byte) [][]byte {
+		res := make([][]byte, 2)
+		for i := 0; i < len(chunk); i++ {
+			if i%2 == 0 {
+				res[0] = append(res[0], chunk[i])
+			} else {
+				res[1] = append(res[1], chunk[i])
+			}
+		}
+		log.Printf("res: %v", res)
+		return res
 	}
-	newLen := *input.ContentLength + int64(repetitions)
-	input.ContentLength = &newLen
-	input.ContentMD5 = nil
 
-	output, err := self.client.PutObject(ctx, input, s3.WithAPIOptions(
-		v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware,
-	))
+	// Create a MultiSplitter
+	ms, readers, err := NewMultiSplitter(input.Body, 1024, 2, splitter)
 	if err != nil {
-		log.Printf("S3 server returned error for PutObject: %v", err)
-		return s3response.PutObjectOutput{}, handleError(err)
+		log.Fatalf("Failed to create MultiSplitter: %v", err)
+		return s3response.PutObjectOutput{}, s3err.GetAPIError(s3err.ErrInternalError)
 	}
-
+	// Duplicate the inputs
+	input.ContentMD5 = nil
+	origLen := *input.ContentLength
+	inputCopy := *input
+	input.Body = readers[0]
+	inputCopy.Body = readers[1]
+	keyCopy := *input.Key + "-copy"
+	inputCopy.Key = &keyCopy
+	newLen1 := origLen / 2
+	if origLen%2 != 0 {
+		newLen1++
+	}
+	newLen2 := origLen / 2
+	input.ContentLength = &newLen1
+	inputCopy.ContentLength = &newLen2
+	inputs := [...]*s3.PutObjectInput{input, &inputCopy}
+	var outputs [2]*s3.PutObjectOutput
+	var errs [2]error
+	var wg sync.WaitGroup
+	// Perform two PutObject operations concurrently
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			output, err := self.client.PutObject(ctx, inputs[i], s3.WithAPIOptions(
+				v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware,
+			))
+			outputs[i] = output
+			errs[i] = err
+		}()
+	}
+	wg.Wait()
+	ms.Close()
+	for i := 0; i < 2; i++ {
+		if errs[i] != nil {
+			log.Printf("S3 server returned error for PutObject[%v]: %v", i, errs[i])
+			return s3response.PutObjectOutput{}, handleError(errs[i])
+		}
+	}
+	output := outputs[0]
 	var versionID string
 	if output.VersionId != nil {
 		versionID = *output.VersionId
