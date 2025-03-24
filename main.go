@@ -476,8 +476,6 @@ func (self *MyBackend) GetObject(ctx context.Context, input *s3.GetObjectInput) 
 		return nil, handleError(err)
 	}
 
-	origBody := output.Body
-	output.Body = UpperCaseReader{r: origBody}
 	return output, nil
 }
 
