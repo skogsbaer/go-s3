@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.78.1
 	github.com/aws/smithy-go v1.22.3
 	github.com/gofiber/fiber/v2 v2.52.6
+	github.com/sirupsen/logrus v1.9.3
 	github.com/versity/versitygw v1.0.11
 )
 
