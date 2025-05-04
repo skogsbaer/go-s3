@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"bufio"
+	"bytes"
+	"crypto/rand"
+	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -68,15 +71,42 @@ func handleError(err error) error {
 func (self *MyBackend) String() string {
 	return self.name
 }
-func (MyBackend) ListBuckets(ctx context.Context, input s3response.ListBucketsInput) (s3response.ListAllMyBucketsResult, error) {
+
+func (self *MyBackend) ListBuckets(ctx context.Context, input s3response.ListBucketsInput) (s3response.ListAllMyBucketsResult, error) {
 	log.Printf("MyBackend.ListBuckets(%v, %v)", ctx, input)
-	return s3response.ListAllMyBucketsResult{}, s3err.GetAPIError(s3err.ErrNotImplemented)
+
+	// Call the S3 client's ListBuckets API
+	output, err := self.client.ListBuckets(ctx, &s3.ListBucketsInput{})
+	if err != nil {
+		return s3response.ListAllMyBucketsResult{}, handleError(err)
+	}
+
+	// Convert the buckets to the required response format
+	var bucketEntries []s3response.ListAllMyBucketsEntry
+	for _, b := range output.Buckets {
+		bucketEntries = append(bucketEntries, s3response.ListAllMyBucketsEntry{
+			Name:         *b.Name,
+			CreationDate: *b.CreationDate, // Fixed: Removed parentheses
+		})
+	}
+
+	return s3response.ListAllMyBucketsResult{
+		Buckets: s3response.ListAllMyBucketsList{
+			Bucket: bucketEntries,
+		},
+		Owner: s3response.CanonicalUser{
+			ID:          "anonymous",
+			DisplayName: "anonymous",
+		},
+	}, nil
 }
+
 func (MyBackend) HeadBucket(ctx context.Context, input *s3.HeadBucketInput) (*s3.HeadBucketOutput, error) {
 	log.Printf("MyBackend.HeadBucket(%v, %v)", ctx, input)
 	// return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
 	return &s3.HeadBucketOutput{}, nil
 }
+
 func (self *MyBackend) GetBucketAcl(
 	ctx context.Context,
 	input *s3.GetBucketAclInput,
@@ -129,38 +159,65 @@ func (MyBackend) PutBucketAcl(ctx context.Context, bucket string, data []byte) e
 	log.Printf("MyBackend.PutBucketAcl(%v, %v)", ctx, bucket)
 	return s3err.GetAPIError(s3err.ErrNotImplemented)
 }
-func (MyBackend) DeleteBucket(ctx context.Context, bucket string) error {
+
+func (self *MyBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	log.Printf("MyBackend.DeleteBucket(%v, %v)", ctx, bucket)
-	return s3err.GetAPIError(s3err.ErrNotImplemented)
+
+	// Attempt to delete the bucket
+	_, err := self.client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+		Bucket: aws.String(bucket),
+	})
+	if err != nil {
+		// Handle specific error cases
+		var ae smithy.APIError
+		if errors.As(err, &ae) {
+			if ae.ErrorCode() == "NoSuchBucket" {
+				return s3err.GetAPIError(s3err.ErrNoSuchBucket)
+			}
+			if ae.ErrorCode() == "BucketNotEmpty" {
+				return s3err.GetAPIError(s3err.ErrBucketNotEmpty)
+			}
+		}
+		return handleError(err)
+	}
+
+	return nil
 }
 func (MyBackend) PutBucketVersioning(ctx context.Context, bucket string, status types.BucketVersioningStatus) error {
 	log.Printf("MyBackend.PutBucketVersioning(%v, %v)", ctx, bucket)
 	return s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) GetBucketVersioning(ctx context.Context, bucket string) (s3response.GetBucketVersioningOutput, error) {
 	log.Printf("MyBackend.GetBucketVersioning(%v, %v)", ctx, bucket)
 	return s3response.GetBucketVersioningOutput{}, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) PutBucketPolicy(ctx context.Context, bucket string, policy []byte) error {
 	log.Printf("MyBackend.PutBucketPolicy(%v, %v)", ctx, bucket)
 	return s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) GetBucketPolicy(ctx context.Context, bucket string) ([]byte, error) {
 	log.Printf("MyBackend.GetBucketPolicy(%v, %v)", ctx, bucket)
 	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) DeleteBucketPolicy(ctx context.Context, bucket string) error {
 	log.Printf("MyBackend.DeleteBucketPolicy(%v, %v)", ctx, bucket)
 	return s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) PutBucketOwnershipControls(ctx context.Context, bucket string, ownership types.ObjectOwnership) error {
 	log.Printf("MyBackend.PutBucketOwnershipControls(%v, %v)", ctx, bucket)
 	return s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) GetBucketOwnershipControls(ctx context.Context, bucket string) (types.ObjectOwnership, error) {
 	log.Printf("MyBackend.GetBucketOwnershipControls(%v, %v)", ctx, bucket)
 	return types.ObjectOwnershipBucketOwnerEnforced, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) DeleteBucketOwnershipControls(ctx context.Context, bucket string) error {
 	log.Printf("MyBackend.DeleteBucketOwnershipControls(%v, %v)", ctx, bucket)
 	return s3err.GetAPIError(s3err.ErrNotImplemented)
@@ -170,26 +227,32 @@ func (MyBackend) CreateMultipartUpload(ctx context.Context, input *s3.CreateMult
 	log.Printf("MyBackend.CreateMultipartUpload(%v, %v)", ctx, input)
 	return s3response.InitiateMultipartUploadResult{}, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) CompleteMultipartUpload(ctx context.Context, input *s3.CompleteMultipartUploadInput) (*s3.CompleteMultipartUploadOutput, error) {
 	log.Printf("MyBackend.CompleteMultipartUpload(%v, %v)", ctx, input)
 	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) AbortMultipartUpload(ctx context.Context, input *s3.AbortMultipartUploadInput) error {
 	log.Printf("MyBackend.AbortMultipartUpload(%v, %v)", ctx, input)
 	return s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) ListMultipartUploads(ctx context.Context, input *s3.ListMultipartUploadsInput) (s3response.ListMultipartUploadsResult, error) {
 	log.Printf("MyBackend.ListMultipartUploads(%v, %v)", ctx, input)
 	return s3response.ListMultipartUploadsResult{}, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) ListParts(ctx context.Context, input *s3.ListPartsInput) (s3response.ListPartsResult, error) {
 	log.Printf("MyBackend.ListParts(%v, %v)", ctx, input)
 	return s3response.ListPartsResult{}, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3.UploadPartOutput, error) {
 	log.Printf("MyBackend.UploadPart(%v, %v)", ctx, input)
 	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) UploadPartCopy(ctx context.Context, input *s3.UploadPartCopyInput) (s3response.CopyPartResult, error) {
 	log.Printf("MyBackend.UploadPartCopy(%v, %v)", ctx, input)
 	return s3response.CopyPartResult{}, s3err.GetAPIError(s3err.ErrNotImplemented)
@@ -283,65 +346,87 @@ func (self *MyBackend) PutObject(
 	input.ObjectLockLegalHoldStatus = ""
 
 	log.Printf("MyBackend.PutObject(%v, %+v)", ctx, input)
-	// Define a splitter function that splits each chunk into outputs parts
-	splitter := func(chunk []byte) [][]byte {
-		res := make([][]byte, 2)
-		for i := 0; i < len(chunk); i++ {
-			if i%2 == 0 {
-				res[0] = append(res[0], chunk[i])
-			} else {
-				res[1] = append(res[1], chunk[i])
-			}
-		}
-		log.Printf("res: %v", res)
-		return res
+
+	// Read the input data into a buffer
+	inputData, err := io.ReadAll(input.Body)
+	if err != nil {
+		return s3response.PutObjectOutput{}, handleError(err)
 	}
 
-	// Create a MultiSplitter
-	ms, readers, err := NewMultiSplitter(input.Body, 1024, 2, splitter)
+	// Generate random noise data of the same length as the input data
+	randomNoise := make([]byte, len(inputData))
+	_, err = rand.Read(randomNoise)
 	if err != nil {
-		log.Fatalf("Failed to create MultiSplitter: %v", err)
-		return s3response.PutObjectOutput{}, s3err.GetAPIError(s3err.ErrInternalError)
+		return s3response.PutObjectOutput{}, handleError(err)
 	}
-	// Duplicate the inputs
-	input.ContentMD5 = nil
-	origLen := *input.ContentLength
-	inputCopy := *input
-	input.Body = readers[0]
-	inputCopy.Body = readers[1]
-	keyCopy := *input.Key + "-copy"
-	inputCopy.Key = &keyCopy
-	newLen1 := origLen / 2
-	if origLen%2 != 0 {
-		newLen1++
+
+	// XOR the input data with the random noise
+	xoredData := make([]byte, len(inputData))
+	for i := range inputData {
+		xoredData[i] = inputData[i] ^ randomNoise[i]
 	}
-	newLen2 := origLen / 2
-	input.ContentLength = &newLen1
-	inputCopy.ContentLength = &newLen2
-	inputs := [...]*s3.PutObjectInput{input, &inputCopy}
-	var outputs [2]*s3.PutObjectOutput
-	var errs [2]error
+
+	// Define a splitter function that splits data into two parts
+	splitter := func(data []byte) [][]byte {
+		mid := len(data) / 2
+		return [][]byte{data[:mid], data[mid:]}
+	}
+
+	// Split the XORed data and random noise into two parts each
+	xoredParts := splitter(xoredData)
+	noiseParts := splitter(randomNoise)
+
+	// Prepare the S3 objects for XORed data
+	keyFirst := *input.Key + ".cypher.first"
+	keySecond := *input.Key + ".cypher.second"
+	inputFirst := *input
+	inputSecond := *input
+	inputFirst.Key = &keyFirst
+	inputSecond.Key = &keySecond
+	inputFirst.Body = io.NopCloser(bytes.NewReader(xoredParts[0]))
+	inputSecond.Body = io.NopCloser(bytes.NewReader(xoredParts[1]))
+	inputFirst.ContentLength = aws.Int64(int64(len(xoredParts[0])))
+	inputSecond.ContentLength = aws.Int64(int64(len(xoredParts[1])))
+
+	// Prepare the S3 objects for random noise
+	keyRandFirst := *input.Key + ".rand.first"
+	keyRandSecond := *input.Key + ".rand.second"
+	randFirst := *input
+	randSecond := *input
+	randFirst.Key = &keyRandFirst
+	randSecond.Key = &keyRandSecond
+	randFirst.Body = io.NopCloser(bytes.NewReader(noiseParts[0]))
+	randSecond.Body = io.NopCloser(bytes.NewReader(noiseParts[1]))
+	randFirst.ContentLength = aws.Int64(int64(len(noiseParts[0])))
+	randSecond.ContentLength = aws.Int64(int64(len(noiseParts[1])))
+
+	// Perform the PutObject operations concurrently
+	inputs := [...]*s3.PutObjectInput{&inputFirst, &inputSecond, &randFirst, &randSecond}
+	var outputs [4]*s3.PutObjectOutput
+	var errs [4]error
 	var wg sync.WaitGroup
-	// Perform two PutObject operations concurrently
-	wg.Add(2)
-	for i := 0; i < 2; i++ {
-		go func() {
+	wg.Add(4)
+	for i := 0; i < 4; i++ {
+		go func(i int) {
 			defer wg.Done()
 			output, err := self.client.PutObject(ctx, inputs[i], s3.WithAPIOptions(
 				v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware,
 			))
 			outputs[i] = output
 			errs[i] = err
-		}()
+		}(i)
 	}
 	wg.Wait()
-	ms.Close()
-	for i := 0; i < 2; i++ {
+
+	// Check for errors
+	for i := 0; i < 4; i++ {
 		if errs[i] != nil {
 			log.Printf("S3 server returned error for PutObject[%v]: %v", i, errs[i])
 			return s3response.PutObjectOutput{}, handleError(errs[i])
 		}
 	}
+
+	// Return the result of the first XORed object
 	output := outputs[0]
 	var versionID string
 	if output.VersionId != nil {
@@ -413,6 +498,40 @@ func (self *MyBackend) HeadObject(ctx context.Context, input *s3.HeadObjectInput
 		input.VersionId = nil
 	}
 
+	// Check if this is a request for the original file
+	key := *input.Key
+	if !strings.HasSuffix(key, ".cypher.first") && 
+	   !strings.HasSuffix(key, ".cypher.second") && 
+	   !strings.HasSuffix(key, ".rand.first") && 
+	   !strings.HasSuffix(key, ".rand.second") {
+		// This is a request for the original file, check if any of the related files exist
+		relatedFiles := []string{
+			key + ".cypher.first",
+			key + ".cypher.second",
+			key + ".rand.first",
+			key + ".rand.second",
+		}
+
+		for _, relatedKey := range relatedFiles {
+			// Create a new input with the related file key
+			relatedInput := &s3.HeadObjectInput{
+				Bucket: input.Bucket,
+				Key:    aws.String(relatedKey),
+			}
+
+			// Try to head the related file
+			out, err := self.client.HeadObject(ctx, relatedInput)
+			if err == nil {
+				// If any related file exists, return its metadata
+				return out, nil
+			}
+		}
+
+		// If none of the related files exist, return 404
+		return nil, handleError(s3err.GetAPIError(s3err.ErrNoSuchKey))
+	}
+
+	// This is a request for a related file, proceed normally
 	out, err := self.client.HeadObject(ctx, input)
 	return out, handleError(err)
 }
@@ -483,14 +602,17 @@ func (MyBackend) GetObjectAcl(ctx context.Context, input *s3.GetObjectAclInput) 
 	log.Printf("MyBackend.GetObjectAcl(%v, %v)", ctx, input)
 	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) GetObjectAttributes(ctx context.Context, input *s3.GetObjectAttributesInput) (s3response.GetObjectAttributesResponse, error) {
 	log.Printf("MyBackend.GetObjectAttributes(%v, %v)", ctx, input)
 	return s3response.GetObjectAttributesResponse{}, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (MyBackend) CopyObject(ctx context.Context, input *s3.CopyObjectInput) (*s3.CopyObjectOutput, error) {
 	log.Printf("MyBackend.CopyObject(%v, %v)", ctx, input)
 	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
 func (self *MyBackend) ListObjects(
 	ctx context.Context,
 	input *s3.ListObjectsInput,
@@ -517,17 +639,222 @@ func (self *MyBackend) ListObjects(
 	}, nil
 }
 
-func (MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV2Input) (s3response.ListObjectsV2Result, error) {
-	log.Printf("MyBackend.ListObjectsV2(%v, %v)", ctx, input)
-	return s3response.ListObjectsV2Result{}, s3err.GetAPIError(s3err.ErrNotImplemented)
+func (self *MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV2Input) (s3response.ListObjectsV2Result, error) {
+	log.Printf("MyBackend.ListObjectsV2 called with input: %+v", input)
+
+	// Create the input for ListObjectsV2
+	listInput := &s3.ListObjectsV2Input{
+		Bucket:            input.Bucket,
+		Prefix:            input.Prefix,
+		Delimiter:         input.Delimiter,
+		StartAfter:        input.StartAfter,
+	}
+
+	// Only include ContinuationToken if it's not empty
+	if input.ContinuationToken != nil && *input.ContinuationToken != "" {
+		listInput.ContinuationToken = input.ContinuationToken
+		log.Printf("Using ContinuationToken: %s", *input.ContinuationToken)
+	} else {
+		log.Printf("No ContinuationToken provided or empty")
+	}
+
+	log.Printf("Sending ListObjectsV2 request to backend: %+v", listInput)
+
+	// Call the S3 client's ListObjectsV2 API
+	output, err := self.client.ListObjectsV2(ctx, listInput)
+	if err != nil {
+		log.Printf("Error from ListObjectsV2: %v", err)
+		return s3response.ListObjectsV2Result{}, handleError(err)
+	}
+
+	// Log the response details
+	log.Printf("ListObjectsV2 response: IsTruncated=%v, KeyCount=%v", output.IsTruncated, output.KeyCount)
+	if output.NextContinuationToken != nil {
+		log.Printf("NextContinuationToken: %s", *output.NextContinuationToken)
+	} else {
+		log.Printf("No NextContinuationToken in response")
+	}
+
+	// Convert the objects to the required response format
+	var contents []s3response.Object
+	for _, obj := range output.Contents {
+		contents = append(contents, s3response.Object{
+			Key:          obj.Key,
+			LastModified: obj.LastModified,
+			ETag:         obj.ETag,
+			Size:         obj.Size,
+			StorageClass: obj.StorageClass,
+		})
+	}
+
+	// Convert the common prefixes
+	var commonPrefixes []types.CommonPrefix
+	for _, prefix := range output.CommonPrefixes {
+		commonPrefixes = append(commonPrefixes, types.CommonPrefix{
+			Prefix: prefix.Prefix,
+		})
+	}
+
+	// Create the response
+	result := s3response.ListObjectsV2Result{
+		Name:                  output.Name,
+		Prefix:                output.Prefix,
+		Delimiter:             output.Delimiter,
+		MaxKeys:               output.MaxKeys,
+		CommonPrefixes:        commonPrefixes,
+		Contents:              contents,
+		IsTruncated:           output.IsTruncated,
+		KeyCount:              output.KeyCount,
+		NextContinuationToken: output.NextContinuationToken,
+		StartAfter:            output.StartAfter,
+	}
+
+	log.Printf("Returning ListObjectsV2 result: IsTruncated=%v, KeyCount=%v, Contents=%d", 
+		result.IsTruncated, result.KeyCount, len(result.Contents))
+
+	return result, nil
 }
-func (MyBackend) DeleteObject(ctx context.Context, input *s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
-	log.Printf("MyBackend.DeleteObject(%v, %v)", ctx, input)
-	return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
+func (self *MyBackend) DeleteObject(ctx context.Context, input *s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
+	// Log all input fields
+	log.Printf("DeleteObject Input Details:")
+	log.Printf("  Bucket: %s", *input.Bucket)
+	log.Printf("  Key: %s", *input.Key)
+	if input.VersionId != nil {
+		log.Printf("  VersionId: %s", *input.VersionId)
+	}
+	if input.ExpectedBucketOwner != nil {
+		log.Printf("  ExpectedBucketOwner: %s", *input.ExpectedBucketOwner)
+	}
+	if input.MFA != nil {
+		log.Printf("  MFA: %s", *input.MFA)
+	}
+	if input.BypassGovernanceRetention != nil {
+		log.Printf("  BypassGovernanceRetention: %v", *input.BypassGovernanceRetention)
+	}
+	log.Printf("  RequestPayer: %s", input.RequestPayer)
+
+	// Clean up empty values
+	if input.ExpectedBucketOwner != nil && *input.ExpectedBucketOwner == "" {
+		input.ExpectedBucketOwner = nil
+	}
+	if input.VersionId != nil && *input.VersionId == "" {
+		input.VersionId = nil
+	}
+	if input.MFA != nil && *input.MFA == "" {
+		input.MFA = nil
+	}
+	if input.BypassGovernanceRetention != nil && !*input.BypassGovernanceRetention {
+		input.BypassGovernanceRetention = nil
+	}
+
+	// Create a new input with only the required fields
+	deleteInput := &s3.DeleteObjectInput{
+		Bucket: input.Bucket,
+		Key:    input.Key,
+	}
+
+	// Only add optional fields if they have values
+	if input.VersionId != nil {
+		deleteInput.VersionId = input.VersionId
+	}
+
+	log.Printf("Sending DeleteObject request to backend: %+v", deleteInput)
+
+	// Call the S3 client's DeleteObject API
+	output, err := self.client.DeleteObject(ctx, deleteInput)
+	if err != nil {
+		log.Printf("Error from DeleteObject: %v", err)
+		var ae smithy.APIError
+		if errors.As(err, &ae) {
+			log.Printf("API Error details - Code: %s, Message: %s", ae.ErrorCode(), ae.ErrorMessage())
+		}
+		return nil, handleError(err)
+	}
+
+	log.Printf("Successfully deleted object: %s from bucket: %s", *input.Key, *input.Bucket)
+	if output.VersionId != nil {
+		log.Printf("Deleted version: %s", *output.VersionId)
+	}
+	if output.DeleteMarker != nil {
+		log.Printf("Delete marker: %v", *output.DeleteMarker)
+	}
+	return output, nil
 }
-func (MyBackend) DeleteObjects(ctx context.Context, input *s3.DeleteObjectsInput) (s3response.DeleteResult, error) {
-	log.Printf("MyBackend.DeleteObjects(%v, %v)", ctx, input)
-	return s3response.DeleteResult{}, s3err.GetAPIError(s3err.ErrNotImplemented)
+
+func (self *MyBackend) DeleteObjects(ctx context.Context, input *s3.DeleteObjectsInput) (s3response.DeleteResult, error) {
+	log.Printf("DeleteObjects Input Details:")
+	log.Printf("  Bucket: %s", *input.Bucket)
+	log.Printf("  Objects to delete: %d", len(input.Delete.Objects))
+	for i, obj := range input.Delete.Objects {
+		log.Printf("  Object[%d]: Key=%s, VersionId=%v", i, *obj.Key, obj.VersionId)
+	}
+
+	// Create a new DeleteObjectsInput with expanded objects list
+	expandedObjects := make([]types.ObjectIdentifier, 0)
+	for _, obj := range input.Delete.Objects {
+		// Skip the original file and only process related files
+		key := *obj.Key
+		if strings.HasSuffix(key, ".cypher.first") || 
+		   strings.HasSuffix(key, ".cypher.second") || 
+		   strings.HasSuffix(key, ".rand.first") || 
+		   strings.HasSuffix(key, ".rand.second") {
+			// This is already a related file, add it directly
+			expandedObjects = append(expandedObjects, types.ObjectIdentifier{
+				Key: obj.Key,
+			})
+			if obj.VersionId != nil {
+				expandedObjects[len(expandedObjects)-1].VersionId = obj.VersionId
+			}
+		} else {
+			// This is the original file, add its related files
+			relatedFiles := []string{
+				key + ".cypher.first",
+				key + ".cypher.second",
+				key + ".rand.first",
+				key + ".rand.second",
+			}
+
+			for _, relatedKey := range relatedFiles {
+				expandedObjects = append(expandedObjects, types.ObjectIdentifier{
+					Key: aws.String(relatedKey),
+				})
+				if obj.VersionId != nil {
+					expandedObjects[len(expandedObjects)-1].VersionId = obj.VersionId
+				}
+			}
+		}
+	}
+
+	// Create a new DeleteObjectsInput with the expanded objects list
+	deleteInput := &s3.DeleteObjectsInput{
+		Bucket: input.Bucket,
+		Delete: &types.Delete{
+			Objects: expandedObjects,
+		},
+	}
+
+	log.Printf("Sending DeleteObjects request to backend with expanded objects: %+v", deleteInput)
+
+	// Call the S3 client's DeleteObjects API
+	output, err := self.client.DeleteObjects(ctx, deleteInput)
+	if err != nil {
+		log.Printf("Error from DeleteObjects: %v", err)
+		var ae smithy.APIError
+		if errors.As(err, &ae) {
+			log.Printf("API Error details - Code: %s, Message: %s", ae.ErrorCode(), ae.ErrorMessage())
+		}
+		return s3response.DeleteResult{}, handleError(err)
+	}
+
+	// Convert the output to the required response format
+	result := s3response.DeleteResult{
+		Deleted: output.Deleted,
+		Error:   output.Errors,
+	}
+
+	log.Printf("Successfully processed DeleteObjects request. Deleted: %d, Errors: %d", 
+		len(result.Deleted), len(result.Error))
+	return result, nil
 }
 func (MyBackend) PutObjectAcl(ctx context.Context, input *s3.PutObjectAclInput) error {
 	log.Printf("MyBackend.PutObjectAcl(%v, %v)", ctx, input)
