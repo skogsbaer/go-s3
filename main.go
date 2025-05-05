@@ -36,8 +36,9 @@ import (
 // S3 proxy implementation:
 // $HOME/go/pkg/mod/github.com/versity/versitygw@v1.0.11/backend/s3proxy/s3.go
 type MyBackend struct {
-	name   string
-	client *s3.Client
+	name    string
+	client1 *s3.Client // First S3 client for .cypher.first and .rand.second
+	client2 *s3.Client // Second S3 client for .cypher.second and .rand.first
 }
 
 const aclKey string = "pcsAclKey"
@@ -76,7 +77,7 @@ func (self *MyBackend) ListBuckets(ctx context.Context, input s3response.ListBuc
 	log.Printf("MyBackend.ListBuckets(%v, %v)", ctx, input)
 
 	// Call the S3 client's ListBuckets API
-	output, err := self.client.ListBuckets(ctx, &s3.ListBucketsInput{})
+	output, err := self.client1.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
 		return s3response.ListAllMyBucketsResult{}, handleError(err)
 	}
@@ -116,7 +117,7 @@ func (self *MyBackend) GetBucketAcl(
 		input.ExpectedBucketOwner = nil
 	}
 
-	tagout, err := self.client.GetBucketTagging(ctx, &s3.GetBucketTaggingInput{
+	tagout, err := self.client1.GetBucketTagging(ctx, &s3.GetBucketTaggingInput{
 		Bucket: input.Bucket,
 	})
 	if err != nil {
@@ -151,7 +152,7 @@ func (self *MyBackend) CreateBucket(
 	ctx context.Context, input *s3.CreateBucketInput, data []byte,
 ) error {
 	log.Printf("MyBackend.CreateBucket(%v, %v)", ctx, input)
-	_, err := self.client.CreateBucket(ctx, input)
+	_, err := self.client1.CreateBucket(ctx, input)
 	return handleError(err)
 }
 
@@ -164,7 +165,7 @@ func (self *MyBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	log.Printf("MyBackend.DeleteBucket(%v, %v)", ctx, bucket)
 
 	// Attempt to delete the bucket
-	_, err := self.client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+	_, err := self.client1.DeleteBucket(ctx, &s3.DeleteBucketInput{
 		Bucket: aws.String(bucket),
 	})
 	if err != nil {
@@ -400,30 +401,64 @@ func (self *MyBackend) PutObject(
 	randFirst.ContentLength = aws.Int64(int64(len(noiseParts[0])))
 	randSecond.ContentLength = aws.Int64(int64(len(noiseParts[1])))
 
-	// Perform the PutObject operations concurrently
-	inputs := [...]*s3.PutObjectInput{&inputFirst, &inputSecond, &randFirst, &randSecond}
-	var outputs [4]*s3.PutObjectOutput
-	var errs [4]error
+	// Perform the PutObject operations concurrently using both clients
 	var wg sync.WaitGroup
 	wg.Add(4)
-	for i := 0; i < 4; i++ {
-		go func(i int) {
-			defer wg.Done()
-			output, err := self.client.PutObject(ctx, inputs[i], s3.WithAPIOptions(
-				v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware,
-			))
-			outputs[i] = output
-			errs[i] = err
-		}(i)
+
+	// Channel to collect results
+	type result struct {
+		output *s3.PutObjectOutput
+		err    error
+		index  int
 	}
+	results := make(chan result, 4)
+
+	// Store .cypher.first and .rand.second in client1
+	go func() {
+		defer wg.Done()
+		output, err := self.client1.PutObject(ctx, &inputFirst, s3.WithAPIOptions(
+			v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware,
+		))
+		results <- result{output: output, err: err, index: 0}
+	}()
+
+	go func() {
+		defer wg.Done()
+		output, err := self.client1.PutObject(ctx, &randSecond, s3.WithAPIOptions(
+			v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware,
+		))
+		results <- result{output: output, err: err, index: 3}
+	}()
+
+	// Store .cypher.second and .rand.first in client2
+	go func() {
+		defer wg.Done()
+		output, err := self.client2.PutObject(ctx, &inputSecond, s3.WithAPIOptions(
+			v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware,
+		))
+		results <- result{output: output, err: err, index: 1}
+	}()
+
+	go func() {
+		defer wg.Done()
+		output, err := self.client2.PutObject(ctx, &randFirst, s3.WithAPIOptions(
+			v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware,
+		))
+		results <- result{output: output, err: err, index: 2}
+	}()
+
+	// Wait for all operations to complete
 	wg.Wait()
+	close(results)
 
 	// Check for errors
-	for i := 0; i < 4; i++ {
-		if errs[i] != nil {
-			log.Printf("S3 server returned error for PutObject[%v]: %v", i, errs[i])
-			return s3response.PutObjectOutput{}, handleError(errs[i])
+	var outputs [4]*s3.PutObjectOutput
+	for r := range results {
+		if r.err != nil {
+			log.Printf("S3 server returned error for PutObject[%v]: %v", r.index, r.err)
+			return s3response.PutObjectOutput{}, handleError(r.err)
 		}
+		outputs[r.index] = r.output
 	}
 
 	// Return the result of the first XORed object
@@ -520,7 +555,7 @@ func (self *MyBackend) HeadObject(ctx context.Context, input *s3.HeadObjectInput
 			}
 
 			// Try to head the related file
-			out, err := self.client.HeadObject(ctx, relatedInput)
+			out, err := self.client1.HeadObject(ctx, relatedInput)
 			if err == nil {
 				// If any related file exists, return its metadata
 				return out, nil
@@ -532,7 +567,7 @@ func (self *MyBackend) HeadObject(ctx context.Context, input *s3.HeadObjectInput
 	}
 
 	// This is a request for a related file, proceed normally
-	out, err := self.client.HeadObject(ctx, input)
+	out, err := self.client1.HeadObject(ctx, input)
 	return out, handleError(err)
 }
 
@@ -597,31 +632,37 @@ func (self *MyBackend) GetObject(ctx context.Context, input *s3.GetObjectInput) 
 		!strings.HasSuffix(key, ".rand.first") &&
 		!strings.HasSuffix(key, ".rand.second") {
 		// This is a request for the original file, we need to reconstruct it
-		// from its four parts
-		relatedFiles := []string{
-			key + ".cypher.first",
-			key + ".cypher.second",
-			key + ".rand.first",
-			key + ".rand.second",
+		// from its four parts across both storage engines
+
+		// Define the related files and their corresponding clients
+		type fileInfo struct {
+			key    string
+			client *s3.Client
+		}
+		files := []fileInfo{
+			{key + ".cypher.first", self.client1},  // client1
+			{key + ".cypher.second", self.client2}, // client2
+			{key + ".rand.first", self.client2},    // client2
+			{key + ".rand.second", self.client1},   // client1
 		}
 
-		// Download all four parts
+		// Download all four parts concurrently
 		var parts [4][]byte
 		var errs [4]error
 		var wg sync.WaitGroup
 		wg.Add(4)
 
-		for i, relatedKey := range relatedFiles {
-			go func(i int, relatedKey string) {
+		for i, file := range files {
+			go func(i int, file fileInfo) {
 				defer wg.Done()
 				// Create a new input for the related file
 				relatedInput := &s3.GetObjectInput{
 					Bucket: input.Bucket,
-					Key:    aws.String(relatedKey),
+					Key:    aws.String(file.key),
 				}
 
-				// Get the related file
-				output, err := self.client.GetObject(ctx, relatedInput)
+				// Get the related file using the appropriate client
+				output, err := file.client.GetObject(ctx, relatedInput)
 				if err != nil {
 					errs[i] = err
 					return
@@ -634,7 +675,7 @@ func (self *MyBackend) GetObject(ctx context.Context, input *s3.GetObjectInput) 
 					return
 				}
 				parts[i] = data
-			}(i, relatedKey)
+			}(i, file)
 		}
 		wg.Wait()
 
@@ -652,8 +693,8 @@ func (self *MyBackend) GetObject(ctx context.Context, input *s3.GetObjectInput) 
 		}
 
 		// Join the parts
-		cypherData := joiner(parts[0], parts[1])
-		randData := joiner(parts[2], parts[3])
+		cypherData := joiner(parts[0], parts[1]) // .cypher.first + .cypher.second
+		randData := joiner(parts[2], parts[3])   // .rand.first + .rand.second
 
 		// XOR the joined data to reconstruct the original
 		secretData := make([]byte, len(cypherData))
@@ -669,8 +710,16 @@ func (self *MyBackend) GetObject(ctx context.Context, input *s3.GetObjectInput) 
 		}, nil
 	}
 
-	// This is a request for a related file, proceed normally
-	output, err := self.client.GetObject(ctx, input)
+	// This is a request for a related file, determine which client to use
+	var client *s3.Client
+	if strings.HasSuffix(key, ".cypher.first") || strings.HasSuffix(key, ".rand.second") {
+		client = self.client1
+	} else {
+		client = self.client2
+	}
+
+	// Get the object using the appropriate client
+	output, err := client.GetObject(ctx, input)
 	if err != nil {
 		return nil, handleError(err)
 	}
@@ -699,7 +748,7 @@ func (self *MyBackend) ListObjects(
 ) (s3response.ListObjectsResult, error) {
 	log.Printf("MyBackend.ListObjects(%v, %v)", ctx, input)
 
-	out, err := self.client.ListObjects(ctx, input)
+	out, err := self.client1.ListObjects(ctx, input)
 	if err != nil {
 		return s3response.ListObjectsResult{}, handleError(err)
 	}
@@ -814,7 +863,7 @@ func (self *MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV
 	log.Printf("Sending ListObjectsV2 request to backend: %+v", listInput)
 
 	// Call the S3 client's ListObjectsV2 API
-	output, err := self.client.ListObjectsV2(ctx, listInput)
+	output, err := self.client1.ListObjectsV2(ctx, listInput)
 	if err != nil {
 		log.Printf("Error from ListObjectsV2: %v", err)
 		return s3response.ListObjectsV2Result{}, handleError(err)
@@ -988,7 +1037,7 @@ func (self *MyBackend) DeleteObject(ctx context.Context, input *s3.DeleteObjectI
 	log.Printf("Sending DeleteObject request to backend: %+v", deleteInput)
 
 	// Call the S3 client's DeleteObject API
-	output, err := self.client.DeleteObject(ctx, deleteInput)
+	output, err := self.client1.DeleteObject(ctx, deleteInput)
 	if err != nil {
 		log.Printf("Error from DeleteObject: %v", err)
 		var ae smithy.APIError
@@ -1063,7 +1112,7 @@ func (self *MyBackend) DeleteObjects(ctx context.Context, input *s3.DeleteObject
 	log.Printf("Sending DeleteObjects request to backend with expanded objects: %+v", deleteInput)
 
 	// Call the S3 client's DeleteObjects API
-	output, err := self.client.DeleteObjects(ctx, deleteInput)
+	output, err := self.client1.DeleteObjects(ctx, deleteInput)
 	if err != nil {
 		log.Printf("Error from DeleteObjects: %v", err)
 		var ae smithy.APIError
@@ -1174,8 +1223,8 @@ func (MyBackend) ListBucketsAndOwners(ctx context.Context) ([]s3response.Bucket,
 }
 
 // FIXME: remove deprecated API
-// createS3Client creates a new AWS S3 client with the provided credentials, region, and endpoint
-func createS3Client(accessKey, secretKey, region, endpoint string) (*s3.Client, error) {
+// createS3Client creates two AWS S3 clients with the provided credentials, region, and endpoint
+func createS3Client(accessKey, secretKey, region, endpoint string) (*s3.Client, *s3.Client, error) {
 	// Create a custom credentials provider
 	credProvider := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
 
@@ -1199,13 +1248,17 @@ func createS3Client(accessKey, secretKey, region, endpoint string) (*s3.Client, 
 		config.WithEndpointResolver(customResolver),
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Create and return the S3 client with custom options
-	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+	// Create and return two S3 clients with custom options
+	client1 := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.UsePathStyle = true // Use path-style addressing
-	}), nil
+	})
+	client2 := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.UsePathStyle = true // Use path-style addressing
+	})
+	return client1, client2, nil
 }
 
 func main() {
@@ -1226,16 +1279,17 @@ func main() {
 	// Specify the S3 server endpoint
 	s3Endpoint := "https://play.min.io"
 
-	// Create the S3 client with the custom endpoint
-	s3Client, err := createS3Client(s3Key, s3Secret, region, s3Endpoint)
+	// Create the S3 clients with the custom endpoint
+	client1, client2, err := createS3Client(s3Key, s3Secret, region, s3Endpoint)
 	if err != nil {
-		log.Fatalf("Failed to create S3 client: %v", err)
+		log.Fatalf("Failed to create S3 clients: %v", err)
 	}
 
-	// Initialize backend with the S3 client
+	// Initialize backend with the S3 clients
 	backend := &MyBackend{
-		name:   "aws-s3-backend",
-		client: s3Client,
+		name:    "aws-s3-backend",
+		client1: client1,
+		client2: client2,
 	}
 
 	iam, err := auth.New(&auth.Opts{
