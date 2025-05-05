@@ -500,10 +500,10 @@ func (self *MyBackend) HeadObject(ctx context.Context, input *s3.HeadObjectInput
 
 	// Check if this is a request for the original file
 	key := *input.Key
-	if !strings.HasSuffix(key, ".cypher.first") && 
-	   !strings.HasSuffix(key, ".cypher.second") && 
-	   !strings.HasSuffix(key, ".rand.first") && 
-	   !strings.HasSuffix(key, ".rand.second") {
+	if !strings.HasSuffix(key, ".cypher.first") &&
+		!strings.HasSuffix(key, ".cypher.second") &&
+		!strings.HasSuffix(key, ".rand.first") &&
+		!strings.HasSuffix(key, ".rand.second") {
 		// This is a request for the original file, check if any of the related files exist
 		relatedFiles := []string{
 			key + ".cypher.first",
@@ -590,6 +590,86 @@ func (self *MyBackend) GetObject(ctx context.Context, input *s3.GetObjectInput) 
 		input.VersionId = nil
 	}
 
+	// Check if this is a request for the original file
+	key := *input.Key
+	if !strings.HasSuffix(key, ".cypher.first") &&
+		!strings.HasSuffix(key, ".cypher.second") &&
+		!strings.HasSuffix(key, ".rand.first") &&
+		!strings.HasSuffix(key, ".rand.second") {
+		// This is a request for the original file, we need to reconstruct it
+		// from its four parts
+		relatedFiles := []string{
+			key + ".cypher.first",
+			key + ".cypher.second",
+			key + ".rand.first",
+			key + ".rand.second",
+		}
+
+		// Download all four parts
+		var parts [4][]byte
+		var errs [4]error
+		var wg sync.WaitGroup
+		wg.Add(4)
+
+		for i, relatedKey := range relatedFiles {
+			go func(i int, relatedKey string) {
+				defer wg.Done()
+				// Create a new input for the related file
+				relatedInput := &s3.GetObjectInput{
+					Bucket: input.Bucket,
+					Key:    aws.String(relatedKey),
+				}
+
+				// Get the related file
+				output, err := self.client.GetObject(ctx, relatedInput)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+
+				// Read the data
+				data, err := io.ReadAll(output.Body)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				parts[i] = data
+			}(i, relatedKey)
+		}
+		wg.Wait()
+
+		// Check for errors
+		for i := 0; i < 4; i++ {
+			if errs[i] != nil {
+				log.Printf("Error downloading part %d: %v", i, errs[i])
+				return nil, handleError(errs[i])
+			}
+		}
+
+		// Define a joiner function that combines two parts
+		joiner := func(part1, part2 []byte) []byte {
+			return append(part1, part2...)
+		}
+
+		// Join the parts
+		cypherData := joiner(parts[0], parts[1])
+		randData := joiner(parts[2], parts[3])
+
+		// XOR the joined data to reconstruct the original
+		secretData := make([]byte, len(cypherData))
+		for i := range cypherData {
+			secretData[i] = cypherData[i] ^ randData[i]
+		}
+
+		// Create a new output with the reconstructed data
+		return &s3.GetObjectOutput{
+			Body:          io.NopCloser(bytes.NewReader(secretData)),
+			ContentLength: aws.Int64(int64(len(secretData))),
+			LastModified:  aws.Time(time.Now()),
+		}, nil
+	}
+
+	// This is a request for a related file, proceed normally
 	output, err := self.client.GetObject(ctx, input)
 	if err != nil {
 		return nil, handleError(err)
@@ -624,6 +704,79 @@ func (self *MyBackend) ListObjects(
 		return s3response.ListObjectsResult{}, handleError(err)
 	}
 
+	// Create a map to track which base files have all four parts
+	completeFiles := make(map[string]bool)
+	baseNames := make(map[string]string)
+
+	// First pass: collect all base names and check for complete sets
+	for _, obj := range out.Contents {
+		key := *obj.Key
+		// Check if this is one of our special files
+		if strings.HasSuffix(key, ".cypher.first") ||
+			strings.HasSuffix(key, ".cypher.second") ||
+			strings.HasSuffix(key, ".rand.first") ||
+			strings.HasSuffix(key, ".rand.second") {
+			// Extract the base name (without the extension)
+			baseName := strings.TrimSuffix(key, ".cypher.first")
+			baseName = strings.TrimSuffix(baseName, ".cypher.second")
+			baseName = strings.TrimSuffix(baseName, ".rand.first")
+			baseName = strings.TrimSuffix(baseName, ".rand.second")
+
+			// Initialize the map entry if it doesn't exist
+			if _, exists := completeFiles[baseName]; !exists {
+				completeFiles[baseName] = true
+				baseNames[baseName] = key // Store the first key we see for this base name
+			}
+		}
+	}
+
+	// Second pass: check which base names have all four parts
+	for baseName := range completeFiles {
+		requiredSuffixes := []string{".cypher.first", ".cypher.second", ".rand.first", ".rand.second"}
+		for _, suffix := range requiredSuffixes {
+			found := false
+			for _, obj := range out.Contents {
+				if *obj.Key == baseName+suffix {
+					found = true
+					break
+				}
+			}
+			if !found {
+				completeFiles[baseName] = false
+				break
+			}
+		}
+	}
+
+	// Create a new list of objects containing only complete sets
+	var filteredContents []types.Object
+	for _, obj := range out.Contents {
+		key := *obj.Key
+		// Check if this is one of our special files
+		if strings.HasSuffix(key, ".cypher.first") ||
+			strings.HasSuffix(key, ".cypher.second") ||
+			strings.HasSuffix(key, ".rand.first") ||
+			strings.HasSuffix(key, ".rand.second") {
+			// Extract the base name (without the extension)
+			baseName := strings.TrimSuffix(key, ".cypher.first")
+			baseName = strings.TrimSuffix(baseName, ".cypher.second")
+			baseName = strings.TrimSuffix(baseName, ".rand.first")
+			baseName = strings.TrimSuffix(baseName, ".rand.second")
+
+			// Only include if it's the first part of a complete set
+			if completeFiles[baseName] && key == baseName+".cypher.first" {
+				// Create a new object with the base name
+				newObj := obj
+				newObj.Key = aws.String(baseName)
+				filteredContents = append(filteredContents, newObj)
+			}
+		}
+		// Regular files (without our special extensions) are not included
+	}
+
+	// Update the output with filtered contents
+	out.Contents = filteredContents
+
 	contents := ConvertObjects(out.Contents)
 
 	return s3response.ListObjectsResult{
@@ -644,10 +797,10 @@ func (self *MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV
 
 	// Create the input for ListObjectsV2
 	listInput := &s3.ListObjectsV2Input{
-		Bucket:            input.Bucket,
-		Prefix:            input.Prefix,
-		Delimiter:         input.Delimiter,
-		StartAfter:        input.StartAfter,
+		Bucket:     input.Bucket,
+		Prefix:     input.Prefix,
+		Delimiter:  input.Delimiter,
+		StartAfter: input.StartAfter,
 	}
 
 	// Only include ContinuationToken if it's not empty
@@ -666,6 +819,79 @@ func (self *MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV
 		log.Printf("Error from ListObjectsV2: %v", err)
 		return s3response.ListObjectsV2Result{}, handleError(err)
 	}
+
+	// Create a map to track which base files have all four parts
+	completeFiles := make(map[string]bool)
+	baseNames := make(map[string]string)
+
+	// First pass: collect all base names and check for complete sets
+	for _, obj := range output.Contents {
+		key := *obj.Key
+		// Check if this is one of our special files
+		if strings.HasSuffix(key, ".cypher.first") ||
+			strings.HasSuffix(key, ".cypher.second") ||
+			strings.HasSuffix(key, ".rand.first") ||
+			strings.HasSuffix(key, ".rand.second") {
+			// Extract the base name (without the extension)
+			baseName := strings.TrimSuffix(key, ".cypher.first")
+			baseName = strings.TrimSuffix(baseName, ".cypher.second")
+			baseName = strings.TrimSuffix(baseName, ".rand.first")
+			baseName = strings.TrimSuffix(baseName, ".rand.second")
+
+			// Initialize the map entry if it doesn't exist
+			if _, exists := completeFiles[baseName]; !exists {
+				completeFiles[baseName] = true
+				baseNames[baseName] = key // Store the first key we see for this base name
+			}
+		}
+	}
+
+	// Second pass: check which base names have all four parts
+	for baseName := range completeFiles {
+		requiredSuffixes := []string{".cypher.first", ".cypher.second", ".rand.first", ".rand.second"}
+		for _, suffix := range requiredSuffixes {
+			found := false
+			for _, obj := range output.Contents {
+				if *obj.Key == baseName+suffix {
+					found = true
+					break
+				}
+			}
+			if !found {
+				completeFiles[baseName] = false
+				break
+			}
+		}
+	}
+
+	// Create a new list of objects containing only complete sets
+	var filteredContents []types.Object
+	for _, obj := range output.Contents {
+		key := *obj.Key
+		// Check if this is one of our special files
+		if strings.HasSuffix(key, ".cypher.first") ||
+			strings.HasSuffix(key, ".cypher.second") ||
+			strings.HasSuffix(key, ".rand.first") ||
+			strings.HasSuffix(key, ".rand.second") {
+			// Extract the base name (without the extension)
+			baseName := strings.TrimSuffix(key, ".cypher.first")
+			baseName = strings.TrimSuffix(baseName, ".cypher.second")
+			baseName = strings.TrimSuffix(baseName, ".rand.first")
+			baseName = strings.TrimSuffix(baseName, ".rand.second")
+
+			// Only include if it's the first part of a complete set
+			if completeFiles[baseName] && key == baseName+".cypher.first" {
+				// Create a new object with the base name
+				newObj := obj
+				newObj.Key = aws.String(baseName)
+				filteredContents = append(filteredContents, newObj)
+			}
+		}
+		// Regular files (without our special extensions) are not included
+	}
+
+	// Update the output with filtered contents
+	output.Contents = filteredContents
 
 	// Log the response details
 	log.Printf("ListObjectsV2 response: IsTruncated=%v, KeyCount=%v", output.IsTruncated, output.KeyCount)
@@ -709,11 +935,12 @@ func (self *MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV
 		StartAfter:            output.StartAfter,
 	}
 
-	log.Printf("Returning ListObjectsV2 result: IsTruncated=%v, KeyCount=%v, Contents=%d", 
+	log.Printf("Returning ListObjectsV2 result: IsTruncated=%v, KeyCount=%v, Contents=%d",
 		result.IsTruncated, result.KeyCount, len(result.Contents))
 
 	return result, nil
 }
+
 func (self *MyBackend) DeleteObject(ctx context.Context, input *s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
 	// Log all input fields
 	log.Printf("DeleteObject Input Details:")
@@ -794,10 +1021,10 @@ func (self *MyBackend) DeleteObjects(ctx context.Context, input *s3.DeleteObject
 	for _, obj := range input.Delete.Objects {
 		// Skip the original file and only process related files
 		key := *obj.Key
-		if strings.HasSuffix(key, ".cypher.first") || 
-		   strings.HasSuffix(key, ".cypher.second") || 
-		   strings.HasSuffix(key, ".rand.first") || 
-		   strings.HasSuffix(key, ".rand.second") {
+		if strings.HasSuffix(key, ".cypher.first") ||
+			strings.HasSuffix(key, ".cypher.second") ||
+			strings.HasSuffix(key, ".rand.first") ||
+			strings.HasSuffix(key, ".rand.second") {
 			// This is already a related file, add it directly
 			expandedObjects = append(expandedObjects, types.ObjectIdentifier{
 				Key: obj.Key,
@@ -852,7 +1079,7 @@ func (self *MyBackend) DeleteObjects(ctx context.Context, input *s3.DeleteObject
 		Error:   output.Errors,
 	}
 
-	log.Printf("Successfully processed DeleteObjects request. Deleted: %d, Errors: %d", 
+	log.Printf("Successfully processed DeleteObjects request. Deleted: %d, Errors: %d",
 		len(result.Deleted), len(result.Error))
 	return result, nil
 }
