@@ -77,24 +77,48 @@ func (self *MyBackend) String() string {
 func (self *MyBackend) ListBuckets(ctx context.Context, input s3response.ListBucketsInput) (s3response.ListAllMyBucketsResult, error) {
 	log.Printf("MyBackend.ListBuckets(%v, %v)", ctx, input)
 
-	// Call the S3 client's ListBuckets API
-	output, err := self.client1.ListBuckets(ctx, &s3.ListBucketsInput{})
+	// Get buckets from both storage systems
+	output1, err := self.client1.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
 		return s3response.ListAllMyBucketsResult{}, handleError(err)
 	}
 
-	// Convert the buckets to the required response format
-	var bucketEntries []s3response.ListAllMyBucketsEntry
-	for _, b := range output.Buckets {
-		bucketEntries = append(bucketEntries, s3response.ListAllMyBucketsEntry{
-			Name:         *b.Name,
-			CreationDate: *b.CreationDate, // Fixed: Removed parentheses
-		})
+	output2, err := self.client2.ListBuckets(ctx, &s3.ListBucketsInput{})
+	if err != nil {
+		return s3response.ListAllMyBucketsResult{}, handleError(err)
+	}
+
+	// Create maps to track buckets in each system
+	buckets1 := make(map[string]time.Time)
+	buckets2 := make(map[string]time.Time)
+
+	// Populate maps with bucket names and creation dates
+	for _, b := range output1.Buckets {
+		buckets1[*b.Name] = *b.CreationDate
+	}
+	for _, b := range output2.Buckets {
+		buckets2[*b.Name] = *b.CreationDate
+	}
+
+	// Find buckets that exist in both systems
+	var commonBuckets []s3response.ListAllMyBucketsEntry
+	for name, date1 := range buckets1 {
+		if date2, exists := buckets2[name]; exists {
+			// Use the earlier creation date
+			creationDate := date1
+			if date2.Before(date1) {
+				creationDate = date2
+			}
+			commonBuckets = append(commonBuckets, s3response.ListAllMyBucketsEntry{
+				Name:         name,
+				CreationDate: creationDate,
+			})
+		}
 	}
 
 	return s3response.ListAllMyBucketsResult{
 		Buckets: s3response.ListAllMyBucketsList{
-			Bucket: bucketEntries,
+			Bucket: commonBuckets,
 		},
 		Owner: s3response.CanonicalUser{
 			ID:          "anonymous",
@@ -814,250 +838,320 @@ func (self *MyBackend) ListObjects(
 
 	log.Printf("MyBackend.ListObjects(%v, %v)", ctx, input)
 
-	out, err := self.client1.ListObjects(ctx, input)
+	// Get objects from both storage systems
+	out1, err := self.client1.ListObjects(ctx, input)
 	if err != nil {
 		return s3response.ListObjectsResult{}, handleError(err)
 	}
 
-	// Create a map to track which base files have all four parts
-	completeFiles := make(map[string]bool)
-	baseNames := make(map[string]string)
+	out2, err := self.client2.ListObjects(ctx, input)
+	if err != nil {
+		return s3response.ListObjectsResult{}, handleError(err)
+	}
 
-	// First pass: collect all base names and check for complete sets
-	for _, obj := range out.Contents {
+	// Create maps to track objects in each system
+	objects1 := make(map[string]types.Object)
+	objects2 := make(map[string]types.Object)
+
+	// Populate maps with objects from each system
+	for _, obj := range out1.Contents {
 		key := *obj.Key
-		// Check if this is one of our special files
-		if strings.HasSuffix(key, ".cypher.first") ||
-			strings.HasSuffix(key, ".cypher.second") ||
-			strings.HasSuffix(key, ".rand.first") ||
-			strings.HasSuffix(key, ".rand.second") {
-			// Extract the base name (without the extension)
-			baseName := strings.TrimSuffix(key, ".cypher.first")
-			baseName = strings.TrimSuffix(baseName, ".cypher.second")
-			baseName = strings.TrimSuffix(baseName, ".rand.first")
-			baseName = strings.TrimSuffix(baseName, ".rand.second")
-
-			// Initialize the map entry if it doesn't exist
-			if _, exists := completeFiles[baseName]; !exists {
-				completeFiles[baseName] = true
-				baseNames[baseName] = key // Store the first key we see for this base name
-			}
+		// Only track objects with correct postfixes for client1
+		if strings.HasSuffix(key, ".cypher.first") || strings.HasSuffix(key, ".rand.second") {
+			objects1[key] = obj
 		}
 	}
 
-	// Second pass: check which base names have all four parts
-	for baseName := range completeFiles {
-		requiredSuffixes := []string{".cypher.first", ".cypher.second", ".rand.first", ".rand.second"}
-		for _, suffix := range requiredSuffixes {
-			found := false
-			for _, obj := range out.Contents {
-				if *obj.Key == baseName+suffix {
-					found = true
+	for _, obj := range out2.Contents {
+		key := *obj.Key
+		// Only track objects with correct postfixes for client2
+		if strings.HasSuffix(key, ".cypher.second") || strings.HasSuffix(key, ".rand.first") {
+			objects2[key] = obj
+		}
+	}
+
+	// Create a map to track which base files have all four parts
+	completeFiles := make(map[string]bool)
+
+	// Check for complete sets across both storage systems
+	for key1 := range objects1 {
+		// Extract base name from client1 objects
+		baseName := strings.TrimSuffix(key1, ".cypher.first")
+		baseName = strings.TrimSuffix(baseName, ".rand.second")
+
+		// Check if all required parts exist
+		requiredParts := []string{
+			baseName + ".cypher.first",  // client1
+			baseName + ".cypher.second", // client2
+			baseName + ".rand.first",    // client2
+			baseName + ".rand.second",   // client1
+		}
+
+		// Verify all parts exist in the correct storage systems
+		allPartsExist := true
+		for _, part := range requiredParts {
+			if strings.HasSuffix(part, ".cypher.first") || strings.HasSuffix(part, ".rand.second") {
+				if _, exists := objects1[part]; !exists {
+					allPartsExist = false
+					break
+				}
+			} else {
+				if _, exists := objects2[part]; !exists {
+					allPartsExist = false
 					break
 				}
 			}
-			if !found {
-				completeFiles[baseName] = false
-				break
-			}
+		}
+
+		if allPartsExist {
+			completeFiles[baseName] = true
 		}
 	}
 
 	// Create a new list of objects containing only complete sets
 	var filteredContents []types.Object
-	for _, obj := range out.Contents {
-		key := *obj.Key
-		// Check if this is one of our special files
-		if strings.HasSuffix(key, ".cypher.first") ||
-			strings.HasSuffix(key, ".cypher.second") ||
-			strings.HasSuffix(key, ".rand.first") ||
-			strings.HasSuffix(key, ".rand.second") {
-			// Extract the base name (without the extension)
-			baseName := strings.TrimSuffix(key, ".cypher.first")
-			baseName = strings.TrimSuffix(baseName, ".cypher.second")
-			baseName = strings.TrimSuffix(baseName, ".rand.first")
-			baseName = strings.TrimSuffix(baseName, ".rand.second")
-
-			// Only include if it's the first part of a complete set
-			if completeFiles[baseName] && key == baseName+".cypher.first" {
-				// Create a new object with the base name
-				newObj := obj
-				newObj.Key = aws.String(baseName)
-				filteredContents = append(filteredContents, newObj)
-			}
+	for baseName := range completeFiles {
+		// Use the .cypher.first object as the base object
+		if obj, exists := objects1[baseName+".cypher.first"]; exists {
+			// Create a new object with the base name
+			newObj := obj
+			newObj.Key = aws.String(baseName)
+			filteredContents = append(filteredContents, newObj)
 		}
-		// Regular files (without our special extensions) are not included
 	}
 
 	// Update the output with filtered contents
-	out.Contents = filteredContents
+	out1.Contents = filteredContents
 
-	contents := ConvertObjects(out.Contents)
+	contents := ConvertObjects(out1.Contents)
 
 	return s3response.ListObjectsResult{
-		CommonPrefixes: out.CommonPrefixes,
+		CommonPrefixes: out1.CommonPrefixes,
 		Contents:       contents,
-		Delimiter:      out.Delimiter,
-		IsTruncated:    out.IsTruncated,
-		Marker:         out.Marker,
-		MaxKeys:        out.MaxKeys,
-		Name:           out.Name,
-		NextMarker:     out.NextMarker,
-		Prefix:         out.Prefix,
+		Delimiter:      out1.Delimiter,
+		IsTruncated:    out1.IsTruncated,
+		Marker:         out1.Marker,
+		MaxKeys:        out1.MaxKeys,
+		Name:           out1.Name,
+		NextMarker:     out1.NextMarker,
+		Prefix:         out1.Prefix,
 	}, nil
 }
 
-func (self *MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV2Input) (s3response.ListObjectsV2Result, error) {
+func (self *MyBackend) ListObjectsV2(
+	ctx context.Context,
+	input *s3.ListObjectsV2Input,
+) (s3response.ListObjectsV2Result, error) {
 	// Check bucket access first
 	if err := self.checkBucketAccess(ctx, *input.Bucket); err != nil {
 		return s3response.ListObjectsV2Result{}, handleError(err)
 	}
 
-	log.Printf("MyBackend.ListObjectsV2 called with input: %+v", input)
+	log.Printf("MyBackend.ListObjectsV2(%v, %v)", ctx, input)
 
-	// Create the input for ListObjectsV2
-	listInput := &s3.ListObjectsV2Input{
-		Bucket:     input.Bucket,
-		Prefix:     input.Prefix,
-		Delimiter:  input.Delimiter,
-		StartAfter: input.StartAfter,
+	// If we have a prefix that doesn't end with a delimiter and is not empty, we should check if it's a file
+	if input.Prefix != nil && *input.Prefix != "" && !strings.HasSuffix(*input.Prefix, "/") {
+		// Check if the file exists in either storage system
+		key := *input.Prefix
+		relatedFiles := []string{
+			key + ".cypher.first",
+			key + ".cypher.second",
+			key + ".rand.first",
+			key + ".rand.second",
+		}
+
+		log.Printf("Checking for complete file set: %s", key)
+
+		// Check if all parts exist
+		allPartsExist := true
+		for _, part := range relatedFiles {
+			var client *s3.Client
+			if strings.HasSuffix(part, ".cypher.first") || strings.HasSuffix(part, ".rand.second") {
+				client = self.client1
+			} else {
+				client = self.client2
+			}
+
+			_, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: input.Bucket,
+				Key:    aws.String(part),
+			})
+			if err != nil {
+				log.Printf("Missing part: %s", part)
+				allPartsExist = false
+				break
+			}
+			log.Printf("Found part: %s", part)
+		}
+
+		if allPartsExist {
+			// If all parts exist, return a single object
+			obj, err := self.client1.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: input.Bucket,
+				Key:    aws.String(key + ".cypher.first"),
+			})
+			if err != nil {
+				return s3response.ListObjectsV2Result{}, handleError(err)
+			}
+
+			// Create a single object entry
+			entry := s3response.Object{
+				Key:          aws.String(key),
+				LastModified: obj.LastModified,
+				ETag:         obj.ETag,
+				Size:         obj.ContentLength,
+				StorageClass: types.ObjectStorageClassStandard,
+			}
+
+			log.Printf("Returning single object: %s", key)
+			return s3response.ListObjectsV2Result{
+				Contents:              []s3response.Object{entry},
+				KeyCount:              aws.Int32(1),
+				MaxKeys:               input.MaxKeys,
+				Name:                  input.Bucket,
+				Prefix:                input.Prefix,
+				IsTruncated:           aws.Bool(false),
+				NextContinuationToken: nil,
+			}, nil
+		} else {
+			// If not all parts exist, return an empty result
+			log.Printf("File not found: %s", key)
+			return s3response.ListObjectsV2Result{
+				Contents:              []s3response.Object{},
+				KeyCount:              aws.Int32(0),
+				MaxKeys:               input.MaxKeys,
+				Name:                  input.Bucket,
+				Prefix:                input.Prefix,
+				IsTruncated:           aws.Bool(false),
+				NextContinuationToken: nil,
+			}, nil
+		}
 	}
 
-	// Only include ContinuationToken if it's not empty
-	if input.ContinuationToken != nil && *input.ContinuationToken != "" {
-		listInput.ContinuationToken = input.ContinuationToken
-		log.Printf("Using ContinuationToken: %s", *input.ContinuationToken)
-	} else {
-		log.Printf("No ContinuationToken provided or empty")
-	}
+	// Create a copy of the input for client1 and client2
+	input1 := *input
+	input2 := *input
 
-	log.Printf("Sending ListObjectsV2 request to backend: %+v", listInput)
+	// Clear continuation token for both inputs
+	input1.ContinuationToken = nil
+	input2.ContinuationToken = nil
 
-	// Call the S3 client's ListObjectsV2 API
-	output, err := self.client1.ListObjectsV2(ctx, listInput)
+	// Get objects from client1
+	out1, err := self.client1.ListObjectsV2(ctx, &input1)
 	if err != nil {
-		log.Printf("Error from ListObjectsV2: %v", err)
 		return s3response.ListObjectsV2Result{}, handleError(err)
+	}
+
+	// Get objects from client2
+	out2, err := self.client2.ListObjectsV2(ctx, &input2)
+	if err != nil {
+		return s3response.ListObjectsV2Result{}, handleError(err)
+	}
+
+	log.Printf("Found %d objects in client1 and %d objects in client2", len(out1.Contents), len(out2.Contents))
+
+	// Create maps to track objects in each system
+	objects1 := make(map[string]types.Object)
+	objects2 := make(map[string]types.Object)
+
+	// Populate maps with objects from each system
+	for _, obj := range out1.Contents {
+		key := *obj.Key
+		// Only track objects with correct postfixes for client1
+		if strings.HasSuffix(key, ".cypher.first") || strings.HasSuffix(key, ".rand.second") {
+			objects1[key] = obj
+			log.Printf("Found object in client1: %s", key)
+		}
+	}
+
+	for _, obj := range out2.Contents {
+		key := *obj.Key
+		// Only track objects with correct postfixes for client2
+		if strings.HasSuffix(key, ".cypher.second") || strings.HasSuffix(key, ".rand.first") {
+			objects2[key] = obj
+			log.Printf("Found object in client2: %s", key)
+		}
 	}
 
 	// Create a map to track which base files have all four parts
 	completeFiles := make(map[string]bool)
-	baseNames := make(map[string]string)
 
-	// First pass: collect all base names and check for complete sets
-	for _, obj := range output.Contents {
-		key := *obj.Key
-		// Check if this is one of our special files
-		if strings.HasSuffix(key, ".cypher.first") ||
-			strings.HasSuffix(key, ".cypher.second") ||
-			strings.HasSuffix(key, ".rand.first") ||
-			strings.HasSuffix(key, ".rand.second") {
-			// Extract the base name (without the extension)
-			baseName := strings.TrimSuffix(key, ".cypher.first")
-			baseName = strings.TrimSuffix(baseName, ".cypher.second")
-			baseName = strings.TrimSuffix(baseName, ".rand.first")
-			baseName = strings.TrimSuffix(baseName, ".rand.second")
+	// Check for complete sets across both storage systems
+	for key1 := range objects1 {
+		// Extract base name from client1 objects
+		baseName := strings.TrimSuffix(key1, ".cypher.first")
+		baseName = strings.TrimSuffix(baseName, ".rand.second")
 
-			// Initialize the map entry if it doesn't exist
-			if _, exists := completeFiles[baseName]; !exists {
-				completeFiles[baseName] = true
-				baseNames[baseName] = key // Store the first key we see for this base name
-			}
+		// Skip if this is not a base name (i.e., it still has a postfix)
+		if baseName == key1 {
+			continue
 		}
-	}
 
-	// Second pass: check which base names have all four parts
-	for baseName := range completeFiles {
-		requiredSuffixes := []string{".cypher.first", ".cypher.second", ".rand.first", ".rand.second"}
-		for _, suffix := range requiredSuffixes {
-			found := false
-			for _, obj := range output.Contents {
-				if *obj.Key == baseName+suffix {
-					found = true
+		log.Printf("Checking complete set for base name: %s", baseName)
+
+		// Check if all required parts exist
+		requiredParts := []string{
+			baseName + ".cypher.first",  // client1
+			baseName + ".cypher.second", // client2
+			baseName + ".rand.first",    // client2
+			baseName + ".rand.second",   // client1
+		}
+
+		// Verify all parts exist in the correct storage systems
+		allPartsExist := true
+		for _, part := range requiredParts {
+			if strings.HasSuffix(part, ".cypher.first") || strings.HasSuffix(part, ".rand.second") {
+				if _, exists := objects1[part]; !exists {
+					log.Printf("Missing part in client1: %s", part)
+					allPartsExist = false
+					break
+				}
+			} else {
+				if _, exists := objects2[part]; !exists {
+					log.Printf("Missing part in client2: %s", part)
+					allPartsExist = false
 					break
 				}
 			}
-			if !found {
-				completeFiles[baseName] = false
-				break
-			}
+		}
+
+		if allPartsExist {
+			log.Printf("Found complete set for: %s", baseName)
+			completeFiles[baseName] = true
 		}
 	}
 
 	// Create a new list of objects containing only complete sets
 	var filteredContents []types.Object
-	for _, obj := range output.Contents {
-		key := *obj.Key
-		// Check if this is one of our special files
-		if strings.HasSuffix(key, ".cypher.first") ||
-			strings.HasSuffix(key, ".cypher.second") ||
-			strings.HasSuffix(key, ".rand.first") ||
-			strings.HasSuffix(key, ".rand.second") {
-			// Extract the base name (without the extension)
-			baseName := strings.TrimSuffix(key, ".cypher.first")
-			baseName = strings.TrimSuffix(baseName, ".cypher.second")
-			baseName = strings.TrimSuffix(baseName, ".rand.first")
-			baseName = strings.TrimSuffix(baseName, ".rand.second")
-
-			// Only include if it's the first part of a complete set
-			if completeFiles[baseName] && key == baseName+".cypher.first" {
-				// Create a new object with the base name
-				newObj := obj
-				newObj.Key = aws.String(baseName)
-				filteredContents = append(filteredContents, newObj)
-			}
+	for baseName := range completeFiles {
+		// Use the .cypher.first object as the base object
+		if obj, exists := objects1[baseName+".cypher.first"]; exists {
+			// Create a new object with the base name
+			newObj := obj
+			newObj.Key = aws.String(baseName)
+			filteredContents = append(filteredContents, newObj)
+			log.Printf("Added complete file to results: %s", baseName)
 		}
-		// Regular files (without our special extensions) are not included
 	}
 
-	// Update the output with filtered contents
-	output.Contents = filteredContents
-
-	// Log the response details
-	log.Printf("ListObjectsV2 response: IsTruncated=%v, KeyCount=%v", output.IsTruncated, output.KeyCount)
-	if output.NextContinuationToken != nil {
-		log.Printf("NextContinuationToken: %s", *output.NextContinuationToken)
-	} else {
-		log.Printf("No NextContinuationToken in response")
-	}
-
-	// Convert the objects to the required response format
-	var contents []s3response.Object
-	for _, obj := range output.Contents {
-		contents = append(contents, s3response.Object{
-			Key:          obj.Key,
-			LastModified: obj.LastModified,
-			ETag:         obj.ETag,
-			Size:         obj.Size,
-			StorageClass: obj.StorageClass,
-		})
-	}
-
-	// Convert the common prefixes
-	var commonPrefixes []types.CommonPrefix
-	for _, prefix := range output.CommonPrefixes {
-		commonPrefixes = append(commonPrefixes, types.CommonPrefix{
-			Prefix: prefix.Prefix,
-		})
-	}
+	// Calculate the new key count based on filtered contents
+	keyCount := int32(len(filteredContents))
 
 	// Create the response
 	result := s3response.ListObjectsV2Result{
-		Name:                  output.Name,
-		Prefix:                output.Prefix,
-		Delimiter:             output.Delimiter,
-		MaxKeys:               output.MaxKeys,
-		CommonPrefixes:        commonPrefixes,
-		Contents:              contents,
-		IsTruncated:           output.IsTruncated,
-		KeyCount:              output.KeyCount,
-		NextContinuationToken: output.NextContinuationToken,
-		StartAfter:            output.StartAfter,
+		CommonPrefixes:        out1.CommonPrefixes,
+		Contents:              ConvertObjects(filteredContents),
+		Delimiter:             out1.Delimiter,
+		IsTruncated:           aws.Bool(false),
+		KeyCount:              &keyCount,
+		MaxKeys:               out1.MaxKeys,
+		Name:                  out1.Name,
+		NextContinuationToken: nil,
+		Prefix:                out1.Prefix,
+		StartAfter:            out1.StartAfter,
 	}
 
-	log.Printf("Returning ListObjectsV2 result: IsTruncated=%v, KeyCount=%v, Contents=%d",
-		result.IsTruncated, result.KeyCount, len(result.Contents))
-
+	log.Printf("Returning %d objects in result", len(result.Contents))
 	return result, nil
 }
 
@@ -1518,7 +1612,7 @@ func main() {
 		accessKey: "SCWMAKHJNSFN5EX7ASDF",
 		secretKey: "6ec7f541-f1a8-42f8-a72c-e1e3b85d615b",
 		region:    "nl-ams",
-		endpoint:  "https://s3.nl-ams.scw.cloud/freiburg-bucket",
+		endpoint:  "https://s3.nl-ams.scw.cloud",
 	}
 
 	log.Printf("Initializing S3 clients...")
