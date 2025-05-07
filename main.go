@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -148,12 +149,62 @@ func (self *MyBackend) GetBucketAcl(
 	return []byte{}, nil
 }
 
+// checkBucketAccess checks if a bucket exists and is accessible in the first storage system
+func (self *MyBackend) checkBucketAccess(ctx context.Context, bucket string) error {
+	// Check first storage system
+	_, err1 := self.client1.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(bucket),
+	})
+	if err1 != nil {
+		var ae smithy.APIError
+		if errors.As(err1, &ae) {
+			if ae.ErrorCode() == "NotFound" {
+				return fmt.Errorf("bucket '%s' does not exist in first storage system", bucket)
+			}
+			if ae.ErrorCode() == "Forbidden" {
+				return fmt.Errorf("no permission to access bucket '%s' in first storage system", bucket)
+			}
+		}
+		return fmt.Errorf("error accessing first storage system: %v", err1)
+	}
+
+	return nil
+}
+
 func (self *MyBackend) CreateBucket(
 	ctx context.Context, input *s3.CreateBucketInput, data []byte,
 ) error {
-	log.Printf("MyBackend.CreateBucket(%v, %v)", ctx, input)
-	_, err := self.client1.CreateBucket(ctx, input)
-	return handleError(err)
+	// Check if bucket already exists in either storage system
+	_, err1 := self.client1.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: input.Bucket,
+	})
+	if err1 == nil {
+		return fmt.Errorf("bucket '%s' already exists in first storage system", *input.Bucket)
+	}
+
+	_, err2 := self.client2.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: input.Bucket,
+	})
+	if err2 == nil {
+		return fmt.Errorf("bucket '%s' already exists in second storage system", *input.Bucket)
+	}
+
+	// Create bucket in both storage systems
+	_, err1 = self.client1.CreateBucket(ctx, input)
+	if err1 != nil {
+		return fmt.Errorf("failed to create bucket '%s' in first storage system: %v", *input.Bucket, err1)
+	}
+
+	_, err2 = self.client2.CreateBucket(ctx, input)
+	if err2 != nil {
+		// If second creation fails, try to clean up the first bucket
+		_, _ = self.client1.DeleteBucket(ctx, &s3.DeleteBucketInput{
+			Bucket: input.Bucket,
+		})
+		return fmt.Errorf("failed to create bucket '%s' in second storage system: %v", *input.Bucket, err2)
+	}
+
+	return nil
 }
 
 func (MyBackend) PutBucketAcl(ctx context.Context, bucket string, data []byte) error {
@@ -162,24 +213,24 @@ func (MyBackend) PutBucketAcl(ctx context.Context, bucket string, data []byte) e
 }
 
 func (self *MyBackend) DeleteBucket(ctx context.Context, bucket string) error {
-	log.Printf("MyBackend.DeleteBucket(%v, %v)", ctx, bucket)
+	// Check if bucket exists in both storage systems
+	if err := self.checkBucketAccess(ctx, bucket); err != nil {
+		return err
+	}
 
-	// Attempt to delete the bucket
-	_, err := self.client1.DeleteBucket(ctx, &s3.DeleteBucketInput{
+	// Delete bucket from both storage systems
+	_, err1 := self.client1.DeleteBucket(ctx, &s3.DeleteBucketInput{
 		Bucket: aws.String(bucket),
 	})
-	if err != nil {
-		// Handle specific error cases
-		var ae smithy.APIError
-		if errors.As(err, &ae) {
-			if ae.ErrorCode() == "NoSuchBucket" {
-				return s3err.GetAPIError(s3err.ErrNoSuchBucket)
-			}
-			if ae.ErrorCode() == "BucketNotEmpty" {
-				return s3err.GetAPIError(s3err.ErrBucketNotEmpty)
-			}
-		}
-		return handleError(err)
+	if err1 != nil {
+		return fmt.Errorf("failed to delete bucket '%s' from first storage system: %v", bucket, err1)
+	}
+
+	_, err2 := self.client2.DeleteBucket(ctx, &s3.DeleteBucketInput{
+		Bucket: aws.String(bucket),
+	})
+	if err2 != nil {
+		return fmt.Errorf("failed to delete bucket '%s' from second storage system: %v", bucket, err2)
 	}
 
 	return nil
@@ -262,6 +313,11 @@ func (MyBackend) UploadPartCopy(ctx context.Context, input *s3.UploadPartCopyInp
 func (self *MyBackend) PutObject(
 	ctx context.Context, input *s3.PutObjectInput,
 ) (s3response.PutObjectOutput, error) {
+	// Check bucket access first
+	if err := self.checkBucketAccess(ctx, *input.Bucket); err != nil {
+		return s3response.PutObjectOutput{}, handleError(err)
+	}
+
 	if input.CacheControl != nil && *input.CacheControl == "" {
 		input.CacheControl = nil
 	}
@@ -572,6 +628,11 @@ func (self *MyBackend) HeadObject(ctx context.Context, input *s3.HeadObjectInput
 }
 
 func (self *MyBackend) GetObject(ctx context.Context, input *s3.GetObjectInput) (*s3.GetObjectOutput, error) {
+	// Check bucket access first
+	if err := self.checkBucketAccess(ctx, *input.Bucket); err != nil {
+		return nil, handleError(err)
+	}
+
 	log.Printf("MyBackend.GetObject(%v, %v)", ctx, input)
 	if input.ExpectedBucketOwner != nil && *input.ExpectedBucketOwner == "" {
 		input.ExpectedBucketOwner = nil
@@ -746,6 +807,11 @@ func (self *MyBackend) ListObjects(
 	ctx context.Context,
 	input *s3.ListObjectsInput,
 ) (s3response.ListObjectsResult, error) {
+	// Check bucket access first
+	if err := self.checkBucketAccess(ctx, *input.Bucket); err != nil {
+		return s3response.ListObjectsResult{}, handleError(err)
+	}
+
 	log.Printf("MyBackend.ListObjects(%v, %v)", ctx, input)
 
 	out, err := self.client1.ListObjects(ctx, input)
@@ -842,6 +908,11 @@ func (self *MyBackend) ListObjects(
 }
 
 func (self *MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV2Input) (s3response.ListObjectsV2Result, error) {
+	// Check bucket access first
+	if err := self.checkBucketAccess(ctx, *input.Bucket); err != nil {
+		return s3response.ListObjectsV2Result{}, handleError(err)
+	}
+
 	log.Printf("MyBackend.ListObjectsV2 called with input: %+v", input)
 
 	// Create the input for ListObjectsV2
@@ -990,73 +1061,6 @@ func (self *MyBackend) ListObjectsV2(ctx context.Context, input *s3.ListObjectsV
 	return result, nil
 }
 
-func (self *MyBackend) DeleteObject(ctx context.Context, input *s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
-	// Log all input fields
-	log.Printf("DeleteObject Input Details:")
-	log.Printf("  Bucket: %s", *input.Bucket)
-	log.Printf("  Key: %s", *input.Key)
-	if input.VersionId != nil {
-		log.Printf("  VersionId: %s", *input.VersionId)
-	}
-	if input.ExpectedBucketOwner != nil {
-		log.Printf("  ExpectedBucketOwner: %s", *input.ExpectedBucketOwner)
-	}
-	if input.MFA != nil {
-		log.Printf("  MFA: %s", *input.MFA)
-	}
-	if input.BypassGovernanceRetention != nil {
-		log.Printf("  BypassGovernanceRetention: %v", *input.BypassGovernanceRetention)
-	}
-	log.Printf("  RequestPayer: %s", input.RequestPayer)
-
-	// Clean up empty values
-	if input.ExpectedBucketOwner != nil && *input.ExpectedBucketOwner == "" {
-		input.ExpectedBucketOwner = nil
-	}
-	if input.VersionId != nil && *input.VersionId == "" {
-		input.VersionId = nil
-	}
-	if input.MFA != nil && *input.MFA == "" {
-		input.MFA = nil
-	}
-	if input.BypassGovernanceRetention != nil && !*input.BypassGovernanceRetention {
-		input.BypassGovernanceRetention = nil
-	}
-
-	// Create a new input with only the required fields
-	deleteInput := &s3.DeleteObjectInput{
-		Bucket: input.Bucket,
-		Key:    input.Key,
-	}
-
-	// Only add optional fields if they have values
-	if input.VersionId != nil {
-		deleteInput.VersionId = input.VersionId
-	}
-
-	log.Printf("Sending DeleteObject request to backend: %+v", deleteInput)
-
-	// Call the S3 client's DeleteObject API
-	output, err := self.client1.DeleteObject(ctx, deleteInput)
-	if err != nil {
-		log.Printf("Error from DeleteObject: %v", err)
-		var ae smithy.APIError
-		if errors.As(err, &ae) {
-			log.Printf("API Error details - Code: %s, Message: %s", ae.ErrorCode(), ae.ErrorMessage())
-		}
-		return nil, handleError(err)
-	}
-
-	log.Printf("Successfully deleted object: %s from bucket: %s", *input.Key, *input.Bucket)
-	if output.VersionId != nil {
-		log.Printf("Deleted version: %s", *output.VersionId)
-	}
-	if output.DeleteMarker != nil {
-		log.Printf("Delete marker: %v", *output.DeleteMarker)
-	}
-	return output, nil
-}
-
 func (self *MyBackend) DeleteObjects(ctx context.Context, input *s3.DeleteObjectsInput) (s3response.DeleteResult, error) {
 	log.Printf("DeleteObjects Input Details:")
 	log.Printf("  Bucket: %s", *input.Bucket)
@@ -1065,73 +1069,152 @@ func (self *MyBackend) DeleteObjects(ctx context.Context, input *s3.DeleteObject
 		log.Printf("  Object[%d]: Key=%s, VersionId=%v", i, *obj.Key, obj.VersionId)
 	}
 
-	// Create a new DeleteObjectsInput with expanded objects list
-	expandedObjects := make([]types.ObjectIdentifier, 0)
+	// Create separate delete requests for each storage system
+	type deleteRequest struct {
+		client *s3.Client
+		keys   []string
+	}
+	deleteRequests := []deleteRequest{
+		{client: self.client1, keys: make([]string, 0)},
+		{client: self.client2, keys: make([]string, 0)},
+	}
+
+	// Distribute objects to their respective storage systems
 	for _, obj := range input.Delete.Objects {
-		// Skip the original file and only process related files
 		key := *obj.Key
-		if strings.HasSuffix(key, ".cypher.first") ||
-			strings.HasSuffix(key, ".cypher.second") ||
-			strings.HasSuffix(key, ".rand.first") ||
-			strings.HasSuffix(key, ".rand.second") {
-			// This is already a related file, add it directly
-			expandedObjects = append(expandedObjects, types.ObjectIdentifier{
-				Key: obj.Key,
-			})
-			if obj.VersionId != nil {
-				expandedObjects[len(expandedObjects)-1].VersionId = obj.VersionId
-			}
+		// Check if this is one of our special files
+		if strings.HasSuffix(key, ".cypher.first") || strings.HasSuffix(key, ".rand.second") {
+			// These go to client1
+			log.Printf("Adding %s to client1 deletion list", key)
+			deleteRequests[0].keys = append(deleteRequests[0].keys, key)
+		} else if strings.HasSuffix(key, ".cypher.second") || strings.HasSuffix(key, ".rand.first") {
+			// These go to client2
+			log.Printf("Adding %s to client2 deletion list", key)
+			deleteRequests[1].keys = append(deleteRequests[1].keys, key)
 		} else {
-			// This is the original file, add its related files
-			relatedFiles := []string{
-				key + ".cypher.first",
-				key + ".cypher.second",
-				key + ".rand.first",
-				key + ".rand.second",
+			// This is the original file, add its related files to both storage systems
+			log.Printf("Original file %s detected, adding all related files", key)
+			relatedFiles := []struct {
+				key    string
+				client int
+			}{
+				{key + ".cypher.first", 0},  // client1
+				{key + ".cypher.second", 1}, // client2
+				{key + ".rand.first", 1},    // client2
+				{key + ".rand.second", 0},   // client1
 			}
 
-			for _, relatedKey := range relatedFiles {
-				expandedObjects = append(expandedObjects, types.ObjectIdentifier{
-					Key: aws.String(relatedKey),
-				})
-				if obj.VersionId != nil {
-					expandedObjects[len(expandedObjects)-1].VersionId = obj.VersionId
+			for _, file := range relatedFiles {
+				log.Printf("Adding %s to client%d deletion list", file.key, file.client+1)
+				deleteRequests[file.client].keys = append(deleteRequests[file.client].keys, file.key)
+			}
+		}
+	}
+
+	// Perform deletions for each storage system
+	var allDeleted []types.DeletedObject
+	var allErrors []types.Error
+
+	for i, req := range deleteRequests {
+		if len(req.keys) == 0 {
+			log.Printf("No objects to delete for client%d", i+1)
+			continue
+		}
+
+		log.Printf("Processing %d objects for client%d", len(req.keys), i+1)
+
+		// Delete each object individually
+		for _, key := range req.keys {
+			log.Printf("Attempting to delete %s from client%d", key, i+1)
+
+			// First verify the object exists before deletion
+			_, err := req.client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: input.Bucket,
+				Key:    aws.String(key),
+			})
+			if err != nil {
+				var ae smithy.APIError
+				if errors.As(err, &ae) && ae.ErrorCode() == "NotFound" {
+					log.Printf("Object %s does not exist in client%d before deletion", key, i+1)
+					continue
 				}
+				log.Printf("Error checking existence of %s in client%d: %v", key, i+1, err)
+			} else {
+				log.Printf("Object %s exists in client%d before deletion", key, i+1)
+			}
+
+			deleteInput := &s3.DeleteObjectInput{
+				Bucket: input.Bucket,
+				Key:    aws.String(key),
+			}
+
+			output, err := req.client.DeleteObject(ctx, deleteInput)
+			if err != nil {
+				log.Printf("Error deleting %s from client%d: %v", key, i+1, err)
+				var ae smithy.APIError
+				if errors.As(err, &ae) {
+					log.Printf("API Error details - Code: %s, Message: %s", ae.ErrorCode(), ae.ErrorMessage())
+					allErrors = append(allErrors, types.Error{
+						Key:     aws.String(key),
+						Code:    aws.String(ae.ErrorCode()),
+						Message: aws.String(ae.ErrorMessage()),
+					})
+				} else {
+					allErrors = append(allErrors, types.Error{
+						Key:     aws.String(key),
+						Code:    aws.String("InternalError"),
+						Message: aws.String(err.Error()),
+					})
+				}
+				continue
+			}
+
+			// Wait a short time to allow for eventual consistency
+			time.Sleep(100 * time.Millisecond)
+
+			// Verify deletion by attempting to head the object
+			_, err = req.client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: input.Bucket,
+				Key:    aws.String(key),
+			})
+			if err != nil {
+				var ae smithy.APIError
+				if errors.As(err, &ae) && ae.ErrorCode() == "NotFound" {
+					log.Printf("Successfully deleted %s from client%d (verified)", key, i+1)
+					allDeleted = append(allDeleted, types.DeletedObject{
+						Key:       aws.String(key),
+						VersionId: output.VersionId,
+					})
+				} else {
+					log.Printf("Warning: Unexpected error verifying deletion of %s from client%d: %v", key, i+1, err)
+					allErrors = append(allErrors, types.Error{
+						Key:     aws.String(key),
+						Code:    aws.String("DeletionVerificationFailed"),
+						Message: aws.String(fmt.Sprintf("Unexpected error verifying deletion: %v", err)),
+					})
+				}
+			} else {
+				log.Printf("Warning: %s still exists in client%d after deletion attempt", key, i+1)
+				allErrors = append(allErrors, types.Error{
+					Key:     aws.String(key),
+					Code:    aws.String("DeletionVerificationFailed"),
+					Message: aws.String("Object still exists after deletion"),
+				})
 			}
 		}
 	}
 
-	// Create a new DeleteObjectsInput with the expanded objects list
-	deleteInput := &s3.DeleteObjectsInput{
-		Bucket: input.Bucket,
-		Delete: &types.Delete{
-			Objects: expandedObjects,
-		},
-	}
-
-	log.Printf("Sending DeleteObjects request to backend with expanded objects: %+v", deleteInput)
-
-	// Call the S3 client's DeleteObjects API
-	output, err := self.client1.DeleteObjects(ctx, deleteInput)
-	if err != nil {
-		log.Printf("Error from DeleteObjects: %v", err)
-		var ae smithy.APIError
-		if errors.As(err, &ae) {
-			log.Printf("API Error details - Code: %s, Message: %s", ae.ErrorCode(), ae.ErrorMessage())
-		}
-		return s3response.DeleteResult{}, handleError(err)
-	}
-
-	// Convert the output to the required response format
+	// Create the final result
 	result := s3response.DeleteResult{
-		Deleted: output.Deleted,
-		Error:   output.Errors,
+		Deleted: allDeleted,
+		Error:   allErrors,
 	}
 
-	log.Printf("Successfully processed DeleteObjects request. Deleted: %d, Errors: %d",
+	log.Printf("Final deletion summary - Total deleted: %d, Total errors: %d",
 		len(result.Deleted), len(result.Error))
 	return result, nil
 }
+
 func (MyBackend) PutObjectAcl(ctx context.Context, input *s3.PutObjectAclInput) error {
 	log.Printf("MyBackend.PutObjectAcl(%v, %v)", ctx, input)
 	return s3err.GetAPIError(s3err.ErrNotImplemented)
@@ -1222,43 +1305,184 @@ func (MyBackend) ListBucketsAndOwners(ctx context.Context) ([]s3response.Bucket,
 	return []s3response.Bucket{}, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
 
-// FIXME: remove deprecated API
-// createS3Client creates two AWS S3 clients with the provided credentials, region, and endpoint
-func createS3Client(accessKey, secretKey, region, endpoint string) (*s3.Client, *s3.Client, error) {
-	// Create a custom credentials provider
-	credProvider := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
-
-	// Create custom endpoint resolver
-	customResolver := aws.EndpointResolverFunc(func(service, region string) (aws.Endpoint, error) {
-		if service == s3.ServiceID {
-			return aws.Endpoint{
-				URL:               endpoint,
-				SigningRegion:     region,
-				HostnameImmutable: true,
-			}, nil
-		}
-		// Fallback to default endpoint resolution
-		return aws.Endpoint{}, &aws.EndpointNotFoundError{}
-	})
-
-	// Load AWS configuration with custom credentials and endpoint resolver
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion(region),
-		config.WithCredentialsProvider(credProvider),
-		config.WithEndpointResolver(customResolver),
+// createS3Client creates two AWS S3 clients with different endpoints and credentials
+func createS3Client(client1Config, client2Config struct {
+	accessKey string
+	secretKey string
+	region    string
+	endpoint  string
+}) (*s3.Client, *s3.Client, error) {
+	// Create first client
+	credProvider1 := credentials.NewStaticCredentialsProvider(
+		client1Config.accessKey,
+		client1Config.secretKey,
+		"",
+	)
+	cfg1, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion(client1Config.region),
+		config.WithCredentialsProvider(credProvider1),
 	)
 	if err != nil {
 		return nil, nil, err
 	}
+	client1 := s3.NewFromConfig(cfg1, func(o *s3.Options) {
+		o.UsePathStyle = true
+		o.BaseEndpoint = aws.String(client1Config.endpoint)
+	})
+	log.Printf("Created client1 with endpoint: %s", client1Config.endpoint)
 
-	// Create and return two S3 clients with custom options
-	client1 := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.UsePathStyle = true // Use path-style addressing
+	// Create second client
+	credProvider2 := credentials.NewStaticCredentialsProvider(
+		client2Config.accessKey,
+		client2Config.secretKey,
+		"",
+	)
+	cfg2, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion(client2Config.region),
+		config.WithCredentialsProvider(credProvider2),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	client2 := s3.NewFromConfig(cfg2, func(o *s3.Options) {
+		o.UsePathStyle = true
+		o.BaseEndpoint = aws.String(client2Config.endpoint)
 	})
-	client2 := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.UsePathStyle = true // Use path-style addressing
-	})
+	log.Printf("Created client2 with endpoint: %s", client2Config.endpoint)
+
+	// Test both clients
+	ctx := context.Background()
+
+	// Test client1
+	_, err = client1.ListBuckets(ctx, &s3.ListBucketsInput{})
+	if err != nil {
+		log.Printf("Warning: client1 test failed: %v", err)
+	} else {
+		log.Printf("client1 test successful")
+	}
+
+	// Test client2
+	_, err = client2.ListBuckets(ctx, &s3.ListBucketsInput{})
+	if err != nil {
+		log.Printf("Warning: client2 test failed: %v", err)
+	} else {
+		log.Printf("client2 test successful")
+	}
+
 	return client1, client2, nil
+}
+
+func (self *MyBackend) DeleteObject(ctx context.Context, input *s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
+	// Check bucket access first
+	if err := self.checkBucketAccess(ctx, *input.Bucket); err != nil {
+		return nil, handleError(err)
+	}
+
+	// Log all input fields
+	log.Printf("DeleteObject Input Details:")
+	log.Printf("  Bucket: %s", *input.Bucket)
+	log.Printf("  Key: %s", *input.Key)
+	if input.VersionId != nil {
+		log.Printf("  VersionId: %s", *input.VersionId)
+	}
+	if input.ExpectedBucketOwner != nil {
+		log.Printf("  ExpectedBucketOwner: %s", *input.ExpectedBucketOwner)
+	}
+	if input.MFA != nil {
+		log.Printf("  MFA: %s", *input.MFA)
+	}
+	if input.BypassGovernanceRetention != nil {
+		log.Printf("  BypassGovernanceRetention: %v", *input.BypassGovernanceRetention)
+	}
+	log.Printf("  RequestPayer: %s", input.RequestPayer)
+
+	// Clean up empty values
+	if input.ExpectedBucketOwner != nil && *input.ExpectedBucketOwner == "" {
+		input.ExpectedBucketOwner = nil
+	}
+	if input.VersionId != nil && *input.VersionId == "" {
+		input.VersionId = nil
+	}
+	if input.MFA != nil && *input.MFA == "" {
+		input.MFA = nil
+	}
+	if input.BypassGovernanceRetention != nil && !*input.BypassGovernanceRetention {
+		input.BypassGovernanceRetention = nil
+	}
+
+	key := *input.Key
+	// Check if this is one of our special files
+	if strings.HasSuffix(key, ".cypher.first") || strings.HasSuffix(key, ".rand.second") {
+		// These go to client1
+		log.Printf("Deleting %s from client1", key)
+		deleteInput := &s3.DeleteObjectInput{
+			Bucket: input.Bucket,
+			Key:    input.Key,
+		}
+		if input.VersionId != nil {
+			deleteInput.VersionId = input.VersionId
+		}
+		output, err := self.client1.DeleteObject(ctx, deleteInput)
+		if err != nil {
+			log.Printf("Error deleting %s from client1: %v", key, err)
+			return nil, handleError(err)
+		}
+		return output, nil
+	} else if strings.HasSuffix(key, ".cypher.second") || strings.HasSuffix(key, ".rand.first") {
+		// These go to client2
+		log.Printf("Deleting %s from client2", key)
+		deleteInput := &s3.DeleteObjectInput{
+			Bucket: input.Bucket,
+			Key:    input.Key,
+		}
+		if input.VersionId != nil {
+			deleteInput.VersionId = input.VersionId
+		}
+		output, err := self.client2.DeleteObject(ctx, deleteInput)
+		if err != nil {
+			log.Printf("Error deleting %s from client2: %v", key, err)
+			return nil, handleError(err)
+		}
+		return output, nil
+	} else {
+		// This is the original file, delete all related files
+		log.Printf("Original file %s detected, deleting all related files", key)
+		relatedFiles := []struct {
+			key    string
+			client *s3.Client
+		}{
+			{key + ".cypher.first", self.client1},  // client1
+			{key + ".cypher.second", self.client2}, // client2
+			{key + ".rand.first", self.client2},    // client2
+			{key + ".rand.second", self.client1},   // client1
+		}
+
+		var lastOutput *s3.DeleteObjectOutput
+		var lastErr error
+
+		for _, file := range relatedFiles {
+			log.Printf("Deleting %s", file.key)
+			deleteInput := &s3.DeleteObjectInput{
+				Bucket: input.Bucket,
+				Key:    aws.String(file.key),
+			}
+			if input.VersionId != nil {
+				deleteInput.VersionId = input.VersionId
+			}
+			output, err := file.client.DeleteObject(ctx, deleteInput)
+			if err != nil {
+				log.Printf("Error deleting %s: %v", file.key, err)
+				lastErr = err
+			} else {
+				lastOutput = output
+			}
+		}
+
+		if lastErr != nil {
+			return nil, handleError(lastErr)
+		}
+		return lastOutput, nil
+	}
 }
 
 func main() {
@@ -1271,18 +1495,72 @@ func main() {
 		DisableStartupMessage: false,
 	})
 
-	key := "testkey"
-	secret := "testsecret"
-	region := "us-east-1"
-	s3Key := "Q3AM3UQ867SPQQA43P2F"
-	s3Secret := "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG"
-	// Specify the S3 server endpoint
-	s3Endpoint := "https://play.min.io"
+	// First S3 storage (MinIO)
+	client1Config := struct {
+		accessKey string
+		secretKey string
+		region    string
+		endpoint  string
+	}{
+		accessKey: "Q3AM3UQ867SPQQA43P2F",
+		secretKey: "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG",
+		region:    "us-east-1",
+		endpoint:  "https://play.min.io",
+	}
 
-	// Create the S3 clients with the custom endpoint
-	client1, client2, err := createS3Client(s3Key, s3Secret, region, s3Endpoint)
+	// Second S3 storage (Scaleway)
+	client2Config := struct {
+		accessKey string
+		secretKey string
+		region    string
+		endpoint  string
+	}{
+		accessKey: "SCWMAKHJNSFN5EX7ASDF",
+		secretKey: "6ec7f541-f1a8-42f8-a72c-e1e3b85d615b",
+		region:    "nl-ams",
+		endpoint:  "https://s3.nl-ams.scw.cloud/freiburg-bucket",
+	}
+
+	log.Printf("Initializing S3 clients...")
+	log.Printf("Client1 config - Endpoint: %s, Region: %s", client1Config.endpoint, client1Config.region)
+	log.Printf("Client2 config - Endpoint: %s, Region: %s", client2Config.endpoint, client2Config.region)
+
+	// Create the S3 clients with different endpoints
+	client1, client2, err := createS3Client(client1Config, client2Config)
 	if err != nil {
 		log.Fatalf("Failed to create S3 clients: %v", err)
+	}
+
+	// Test both clients with a simple operation
+	ctx := context.Background()
+
+	// Test client1
+	log.Printf("Testing client1 connection...")
+	_, err = client1.ListBuckets(ctx, &s3.ListBucketsInput{})
+	if err != nil {
+		log.Printf("Warning: client1 test failed: %v", err)
+	} else {
+		log.Printf("client1 test successful")
+	}
+
+	// Test client2 with more detailed logging
+	log.Printf("Testing client2 connection...")
+	_, err = client2.ListBuckets(ctx, &s3.ListBucketsInput{})
+	if err != nil {
+		log.Printf("Warning: client2 test failed: %v", err)
+	} else {
+		log.Printf("client2 test successful")
+	}
+
+	// Additional test for client2 - try to list objects in the bucket
+	log.Printf("Testing client2 bucket access...")
+	_, err = client2.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket: aws.String("freiburg-bucket"),
+	})
+	if err != nil {
+		log.Printf("Warning: client2 bucket test failed: %v", err)
+	} else {
+		log.Printf("client2 bucket test successful")
 	}
 
 	// Initialize backend with the S3 clients
@@ -1294,8 +1572,8 @@ func main() {
 
 	iam, err := auth.New(&auth.Opts{
 		RootAccount: auth.Account{
-			Access: key,
-			Secret: secret,
+			Access: "testkey",
+			Secret: "testsecret",
 			Role:   auth.RoleAdmin,
 		}})
 	if err != nil {
@@ -1309,7 +1587,7 @@ func main() {
 	_, err = s3api.New(
 		app,
 		backend,
-		middlewares.RootUserConfig{Access: key, Secret: secret},
+		middlewares.RootUserConfig{Access: "testkey", Secret: "testsecret"},
 		"9000",
 		"us-east-1",
 		iam,
