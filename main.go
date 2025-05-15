@@ -15,7 +15,7 @@ import (
 	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
+	configAws "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -29,6 +29,8 @@ import (
 	"github.com/versity/versitygw/s3log"
 	"github.com/versity/versitygw/s3response"
 	"github.com/versity/versitygw/s3select"
+
+	"go-s3-versity/config"
 
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -1400,68 +1402,34 @@ func (MyBackend) ListBucketsAndOwners(ctx context.Context) ([]s3response.Bucket,
 }
 
 // createS3Client creates two AWS S3 clients with different endpoints and credentials
-func createS3Client(client1Config, client2Config struct {
-	accessKey string
-	secretKey string
-	region    string
-	endpoint  string
-}) (*s3.Client, *s3.Client, error) {
-	// Create first client
-	credProvider1 := credentials.NewStaticCredentialsProvider(
-		client1Config.accessKey,
-		client1Config.secretKey,
-		"",
-	)
-	cfg1, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion(client1Config.region),
-		config.WithCredentialsProvider(credProvider1),
+func createS3Client(client1Config, client2Config config.S3ClientConfig) (*s3.Client, *s3.Client, error) {
+	credProvider1 := credentials.NewStaticCredentialsProvider(client1Config.AccessKey, client1Config.SecretKey, "")
+	cfg1, err := configAws.LoadDefaultConfig(context.TODO(),
+		configAws.WithRegion(client1Config.Region),
+		configAws.WithCredentialsProvider(credProvider1),
 	)
 	if err != nil {
 		return nil, nil, err
 	}
 	client1 := s3.NewFromConfig(cfg1, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(client1Config.Endpoint)
 		o.UsePathStyle = true
-		o.BaseEndpoint = aws.String(client1Config.endpoint)
 	})
-	log.Printf("Created client1 with endpoint: %s", client1Config.endpoint)
+	log.Printf("Created client1 with endpoint: %s", client1Config.Endpoint)
 
-	// Create second client
-	credProvider2 := credentials.NewStaticCredentialsProvider(
-		client2Config.accessKey,
-		client2Config.secretKey,
-		"",
-	)
-	cfg2, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion(client2Config.region),
-		config.WithCredentialsProvider(credProvider2),
+	credProvider2 := credentials.NewStaticCredentialsProvider(client2Config.AccessKey, client2Config.SecretKey, "")
+	cfg2, err := configAws.LoadDefaultConfig(context.TODO(),
+		configAws.WithRegion(client2Config.Region),
+		configAws.WithCredentialsProvider(credProvider2),
 	)
 	if err != nil {
 		return nil, nil, err
 	}
 	client2 := s3.NewFromConfig(cfg2, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(client2Config.Endpoint)
 		o.UsePathStyle = true
-		o.BaseEndpoint = aws.String(client2Config.endpoint)
 	})
-	log.Printf("Created client2 with endpoint: %s", client2Config.endpoint)
-
-	// Test both clients
-	ctx := context.Background()
-
-	// Test client1
-	_, err = client1.ListBuckets(ctx, &s3.ListBucketsInput{})
-	if err != nil {
-		log.Printf("Warning: client1 test failed: %v", err)
-	} else {
-		log.Printf("client1 test successful")
-	}
-
-	// Test client2
-	_, err = client2.ListBuckets(ctx, &s3.ListBucketsInput{})
-	if err != nil {
-		log.Printf("Warning: client2 test failed: %v", err)
-	} else {
-		log.Printf("client2 test successful")
-	}
+	log.Printf("Created client2 with endpoint: %s", client2Config.Endpoint)
 
 	return client1, client2, nil
 }
@@ -1589,35 +1557,12 @@ func main() {
 		DisableStartupMessage: false,
 	})
 
-	// First S3 storage (MinIO)
-	client1Config := struct {
-		accessKey string
-		secretKey string
-		region    string
-		endpoint  string
-	}{
-		accessKey: "Q3AM3UQ867SPQQA43P2F",
-		secretKey: "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG",
-		region:    "us-east-1",
-		endpoint:  "https://play.min.io",
-	}
-
-	// Second S3 storage (Scaleway)
-	client2Config := struct {
-		accessKey string
-		secretKey string
-		region    string
-		endpoint  string
-	}{
-		accessKey: "SCWMAKHJNSFN5EX7ASDF",
-		secretKey: "6ec7f541-f1a8-42f8-a72c-e1e3b85d615b",
-		region:    "nl-ams",
-		endpoint:  "https://s3.nl-ams.scw.cloud",
-	}
+	// Load S3 client configs from config package
+	client1Config, client2Config := config.LoadDefaultConfigs()
 
 	log.Printf("Initializing S3 clients...")
-	log.Printf("Client1 config - Endpoint: %s, Region: %s", client1Config.endpoint, client1Config.region)
-	log.Printf("Client2 config - Endpoint: %s, Region: %s", client2Config.endpoint, client2Config.region)
+	log.Printf("Client1 config - Endpoint: %s, Region: %s", client1Config.Endpoint, client1Config.Region)
+	log.Printf("Client2 config - Endpoint: %s, Region: %s", client2Config.Endpoint, client2Config.Region)
 
 	// Create the S3 clients with different endpoints
 	client1, client2, err := createS3Client(client1Config, client2Config)
