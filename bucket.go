@@ -208,3 +208,60 @@ func (MyBackend) GetBucketOwnershipControls(ctx context.Context, bucket string) 
 	log.Printf("MyBackend.GetBucketOwnershipControls(%v, %v)", ctx, bucket)
 	return types.ObjectOwnershipBucketOwnerEnforced, s3err.GetAPIError(s3err.ErrNotImplemented)
 }
+
+func (MyBackend) PutBucketAcl(ctx context.Context, bucket string, data []byte) error {
+	log.Printf("MyBackend.PutBucketAcl(%v, %v)", ctx, bucket)
+	return s3err.GetAPIError(s3err.ErrNotImplemented)
+}
+
+func (MyBackend) PutBucketVersioning(ctx context.Context, bucket string, status types.BucketVersioningStatus) error {
+	log.Printf("MyBackend.PutBucketVersioning(%v, %v)", ctx, bucket)
+	return s3err.GetAPIError(s3err.ErrNotImplemented)
+}
+
+func (MyBackend) PutBucketPolicy(ctx context.Context, bucket string, policy []byte) error {
+	log.Printf("MyBackend.PutBucketPolicy(%v, %v)", ctx, bucket)
+	return s3err.GetAPIError(s3err.ErrNotImplemented)
+}
+
+func (MyBackend) PutBucketOwnershipControls(ctx context.Context, bucket string, ownership types.ObjectOwnership) error {
+	log.Printf("MyBackend.PutBucketOwnershipControls(%v, %v)", ctx, bucket)
+	return s3err.GetAPIError(s3err.ErrNotImplemented)
+}
+
+func (MyBackend) HeadBucket(ctx context.Context, input *s3.HeadBucketInput) (*s3.HeadBucketOutput, error) {
+	log.Printf("MyBackend.HeadBucket(%v, %v)", ctx, input)
+	// return nil, s3err.GetAPIError(s3err.ErrNotImplemented)
+	return &s3.HeadBucketOutput{}, nil
+}
+
+func (self *MyBackend) checkBucketAccess(ctx context.Context, bucket string) error {
+	// Check first storage system
+	_, err1 := self.client1.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(bucket),
+	})
+	if err1 != nil {
+		var ae smithy.APIError
+		if errors.As(err1, &ae) {
+			if ae.ErrorCode() == "NotFound" {
+				return s3err.GetAPIError(s3err.ErrNoSuchBucket)
+			}
+			if ae.ErrorCode() == "Forbidden" {
+				return s3err.GetAPIError(s3err.ErrAccessDenied)
+			}
+		}
+		return handleError(err1)
+	}
+
+	return nil
+}
+
+func (MyBackend) PutBucketTagging(ctx context.Context, bucket string, tags map[string]string) error {
+	log.Printf("MyBackend.PutBucketTagging(%v, %v)", ctx, bucket)
+	return s3err.GetAPIError(s3err.ErrNotImplemented)
+}
+
+func (MyBackend) ListBucketsAndOwners(ctx context.Context) ([]s3response.Bucket, error) {
+	log.Printf("MyBackend.ListBucketsAndOwners(%v)", ctx)
+	return []s3response.Bucket{}, s3err.GetAPIError(s3err.ErrNotImplemented)
+}
