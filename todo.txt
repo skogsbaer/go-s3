@@ -1,0 +1,6 @@
+Things which need to be clarified:
+- How to handle the case where the two storages show irregularities like:
+    * One storage has a file, the other doesn't
+    * One storage has the required bucket, the other does not# Todo List
+
+- [ ] Add your tasks here 
