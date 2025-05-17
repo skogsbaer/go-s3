@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,6 +87,69 @@ func TestObjectDownload(t *testing.T) {
 	t.Log("Verifying downloaded file...")
 	if err := verifyDownloadedFile(t, downloadedFile); err != nil {
 		t.Fatalf("Failed to verify downloaded file: %v", err)
+	}
+}
+
+func TestListBucket(t *testing.T) {
+	// 1. Setup: Create or clean bucket
+	t.Log("Setting up test environment...")
+	if err := setupTestEnvironment(t); err != nil {
+		t.Fatalf("Failed to setup test environment: %v", err)
+	}
+	defer cleanupTestEnvironment(t)
+
+	// Create bucket through our gateway
+	t.Log("Creating test bucket...")
+	cmd := exec.Command("mc", "mb", "local-s3/"+testBucket)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to create bucket through gateway: %v", err)
+	}
+
+	// 2. Upload a test file
+	t.Log("Uploading test file through gateway...")
+	if err := uploadTestFile(t); err != nil {
+		t.Fatalf("Failed to upload test file: %v", err)
+	}
+
+	// Wait a moment to ensure file replication is complete
+	time.Sleep(2 * time.Second)
+
+	// 3. Verify files in first storage (MinIO)
+	t.Log("Verifying files in first storage...")
+	cmd = exec.Command("mc", "ls", "play/"+testBucket)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to list files in first storage: %v", err)
+	}
+	firstStorageFiles := string(output)
+	if !strings.Contains(firstStorageFiles, testFile+".cypher.first") ||
+		!strings.Contains(firstStorageFiles, testFile+".rand.second") {
+		t.Errorf("Expected files not found in first storage. Got:\n%s", firstStorageFiles)
+	}
+
+	// 4. Verify files in second storage (Scaleway)
+	t.Log("Verifying files in second storage...")
+	cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to list files in second storage: %v", err)
+	}
+	secondStorageFiles := string(output)
+	if !strings.Contains(secondStorageFiles, testFile+".cypher.second") ||
+		!strings.Contains(secondStorageFiles, testFile+".rand.first") {
+		t.Errorf("Expected files not found in second storage. Got:\n%s", secondStorageFiles)
+	}
+
+	// 5. List files through gateway
+	t.Log("Listing files through gateway...")
+	cmd = exec.Command("mc", "ls", "local-s3/"+testBucket)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to list files through gateway: %v", err)
+	}
+	gatewayFiles := string(output)
+	if !strings.Contains(gatewayFiles, testFile) {
+		t.Errorf("Expected file not found in gateway listing. Got:\n%s", gatewayFiles)
 	}
 }
 
