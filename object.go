@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -224,6 +223,7 @@ func (self *MyBackend) PutObject(
 		return s3response.PutObjectOutput{}, handleError(err)
 	}
 
+	// Clean up empty optional fields
 	if input.CacheControl != nil && *input.CacheControl == "" {
 		input.CacheControl = nil
 	}
@@ -310,58 +310,46 @@ func (self *MyBackend) PutObject(
 
 	log.Printf("MyBackend.PutObject(%v, %+v)", ctx, input)
 
-	// Read the input data into a buffer
-	inputData, err := io.ReadAll(input.Body)
-	if err != nil {
-		return s3response.PutObjectOutput{}, handleError(err)
-	}
+	// Create pipes for the data streams
+	pr1, pw1 := io.Pipe()
+	pr2, pw2 := io.Pipe()
+	pr3, pw3 := io.Pipe()
+	pr4, pw4 := io.Pipe()
 
-	// Generate random noise data of the same length as the input data
-	randomNoise := make([]byte, len(inputData))
-	_, err = rand.Read(randomNoise)
-	if err != nil {
-		return s3response.PutObjectOutput{}, handleError(err)
-	}
+	// Create a multi-writer to write to all pipes
+	mw := io.MultiWriter(pw1, pw2, pw3, pw4)
 
-	// XOR the input data with the random noise
-	xoredData := make([]byte, len(inputData))
-	for i := range inputData {
-		xoredData[i] = inputData[i] ^ randomNoise[i]
-	}
+	// Start a goroutine to copy the input data to all pipes
+	go func() {
+		defer pw1.Close()
+		defer pw2.Close()
+		defer pw3.Close()
+		defer pw4.Close()
+		if _, err := io.Copy(mw, input.Body); err != nil {
+			log.Printf("Error copying data: %v", err)
+		}
+	}()
 
-	// Define a splitter function that splits data into two parts
-	splitter := func(data []byte) [][]byte {
-		mid := len(data) / 2
-		return [][]byte{data[:mid], data[mid:]}
-	}
-
-	// Split the XORed data and random noise into two parts each
-	xoredParts := splitter(xoredData)
-	noiseParts := splitter(randomNoise)
-
-	// Prepare the S3 objects for XORed data
+	// Prepare the S3 objects
 	keyFirst := *input.Key + ".cypher.first"
 	keySecond := *input.Key + ".cypher.second"
-	inputFirst := *input
-	inputSecond := *input
-	inputFirst.Key = &keyFirst
-	inputSecond.Key = &keySecond
-	inputFirst.Body = io.NopCloser(bytes.NewReader(xoredParts[0]))
-	inputSecond.Body = io.NopCloser(bytes.NewReader(xoredParts[1]))
-	inputFirst.ContentLength = aws.Int64(int64(len(xoredParts[0])))
-	inputSecond.ContentLength = aws.Int64(int64(len(xoredParts[1])))
-
-	// Prepare the S3 objects for random noise
 	keyRandFirst := *input.Key + ".rand.first"
 	keyRandSecond := *input.Key + ".rand.second"
+
+	inputFirst := *input
+	inputSecond := *input
 	randFirst := *input
 	randSecond := *input
+
+	inputFirst.Key = &keyFirst
+	inputSecond.Key = &keySecond
 	randFirst.Key = &keyRandFirst
 	randSecond.Key = &keyRandSecond
-	randFirst.Body = io.NopCloser(bytes.NewReader(noiseParts[0]))
-	randSecond.Body = io.NopCloser(bytes.NewReader(noiseParts[1]))
-	randFirst.ContentLength = aws.Int64(int64(len(noiseParts[0])))
-	randSecond.ContentLength = aws.Int64(int64(len(noiseParts[1])))
+
+	inputFirst.Body = pr1
+	inputSecond.Body = pr2
+	randFirst.Body = pr3
+	randSecond.Body = pr4
 
 	// Perform the PutObject operations concurrently using both clients
 	var wg sync.WaitGroup
@@ -423,21 +411,15 @@ func (self *MyBackend) PutObject(
 		outputs[r.index] = r.output
 	}
 
-	// Return the result of the first XORed object
-	output := outputs[0]
-	var versionID string
-	if output.VersionId != nil {
-		versionID = *output.VersionId
-	}
-
+	// Return a success response
 	return s3response.PutObjectOutput{
-		ETag:              *output.ETag,
-		VersionID:         versionID,
-		ChecksumCRC32:     output.ChecksumCRC32,
-		ChecksumCRC32C:    output.ChecksumCRC32C,
-		ChecksumCRC64NVME: output.ChecksumCRC64NVME,
-		ChecksumSHA1:      output.ChecksumSHA1,
-		ChecksumSHA256:    output.ChecksumSHA256,
+		ETag:              *outputs[0].ETag,
+		VersionID:         *outputs[0].VersionId,
+		ChecksumCRC32:     outputs[0].ChecksumCRC32,
+		ChecksumCRC32C:    outputs[0].ChecksumCRC32C,
+		ChecksumCRC64NVME: outputs[0].ChecksumCRC64NVME,
+		ChecksumSHA1:      outputs[0].ChecksumSHA1,
+		ChecksumSHA256:    outputs[0].ChecksumSHA256,
 	}, nil
 }
 

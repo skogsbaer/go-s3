@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"time"
 
@@ -19,8 +20,6 @@ import (
 	"github.com/versity/versitygw/s3err"
 	"github.com/versity/versitygw/s3log"
 	"github.com/versity/versitygw/s3response"
-
-	"go-s3-versity/config"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
@@ -101,7 +100,7 @@ func (MyBackend) UploadPartCopy(ctx context.Context, input *s3.UploadPartCopyInp
 }
 
 // createS3Client creates two AWS S3 clients with different endpoints and credentials
-func createS3Client(client1Config, client2Config config.S3ClientConfig) (*s3.Client, *s3.Client, error) {
+func createS3Client(client1Config, client2Config S3ClientConfig) (*s3.Client, *s3.Client, error) {
 	credProvider1 := credentials.NewStaticCredentialsProvider(client1Config.AccessKey, client1Config.SecretKey, "")
 	cfg1, err := configAws.LoadDefaultConfig(context.TODO(),
 		configAws.WithRegion(client1Config.Region),
@@ -134,6 +133,10 @@ func createS3Client(client1Config, client2Config config.S3ClientConfig) (*s3.Cli
 }
 
 func main() {
+	// Parse command line flags
+	localMinio := flag.Bool("local-minio", false, "Use local MinIO server")
+	flag.Parse()
+
 	app := fiber.New(fiber.Config{
 		AppName:               "go-s3",
 		ServerHeader:          "GO_S3",
@@ -143,8 +146,8 @@ func main() {
 		DisableStartupMessage: false,
 	})
 
-	// Load S3 client configs from config package
-	client1Config, client2Config := config.LoadDefaultConfigs()
+	// Load S3 client configs
+	client1Config, client2Config := LoadDefaultConfigs(*localMinio)
 
 	log.Printf("Initializing S3 clients...")
 	log.Printf("Client1 config - Endpoint: %s, Region: %s", client1Config.Endpoint, client1Config.Region)
