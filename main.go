@@ -4,7 +4,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -20,6 +25,9 @@ import (
 	"github.com/versity/versitygw/s3err"
 	"github.com/versity/versitygw/s3log"
 	"github.com/versity/versitygw/s3response"
+
+	"crypto/tls"
+	"crypto/x509"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
@@ -101,33 +109,100 @@ func (MyBackend) UploadPartCopy(ctx context.Context, input *s3.UploadPartCopyInp
 
 // createS3Client creates two AWS S3 clients with different endpoints and credentials
 func createS3Client(client1Config, client2Config S3ClientConfig) (*s3.Client, *s3.Client, error) {
-	credProvider1 := credentials.NewStaticCredentialsProvider(client1Config.AccessKey, client1Config.SecretKey, "")
+	// Create custom HTTP client with TLS config
+	var tlsConfig *tls.Config
+	if strings.HasPrefix(client1Config.Endpoint, "https://") {
+		// Get the system's root certificate pool
+		systemRoots, err := x509.SystemCertPool()
+		if err != nil {
+			systemRoots = x509.NewCertPool()
+		}
+
+		// Load the certificate file from the certs directory
+		certFile := filepath.Join("certs", "cert.pem")
+		cert, err := os.ReadFile(certFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read certificate file: %v", err)
+		}
+
+		// Add our certificate to the system's root pool
+		if !systemRoots.AppendCertsFromPEM(cert) {
+			return nil, nil, fmt.Errorf("failed to append certificate to pool")
+		}
+
+		tlsConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    systemRoots,
+			ServerName: "localhost",
+			// For development only - remove in production
+			InsecureSkipVerify: true,
+		}
+	} else {
+		tlsConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConns:        100,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	httpClient := &http.Client{
+		Transport: tr,
+		Timeout:   30 * time.Second,
+	}
+
+	// Create custom endpoint resolver
+	customResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+		return aws.Endpoint{
+			URL:               client1Config.Endpoint,
+			HostnameImmutable: true,
+			SigningRegion:     client1Config.Region,
+		}, nil
+	})
+
+	// Load AWS config for client1
 	cfg1, err := configAws.LoadDefaultConfig(context.TODO(),
 		configAws.WithRegion(client1Config.Region),
-		configAws.WithCredentialsProvider(credProvider1),
+		configAws.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(client1Config.AccessKey, client1Config.SecretKey, "")),
+		configAws.WithHTTPClient(httpClient),
+		configAws.WithEndpointResolverWithOptions(customResolver),
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to load AWS config for client1: %v", err)
 	}
+
+	// Create client1 with custom options
 	client1 := s3.NewFromConfig(cfg1, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(client1Config.Endpoint)
 		o.UsePathStyle = true
 	})
-	log.Printf("Created client1 with endpoint: %s", client1Config.Endpoint)
 
-	credProvider2 := credentials.NewStaticCredentialsProvider(client2Config.AccessKey, client2Config.SecretKey, "")
+	// Create custom endpoint resolver for client2
+	customResolver2 := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+		return aws.Endpoint{
+			URL:               client2Config.Endpoint,
+			HostnameImmutable: true,
+			SigningRegion:     client2Config.Region,
+		}, nil
+	})
+
+	// Load AWS config for client2
 	cfg2, err := configAws.LoadDefaultConfig(context.TODO(),
 		configAws.WithRegion(client2Config.Region),
-		configAws.WithCredentialsProvider(credProvider2),
+		configAws.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(client2Config.AccessKey, client2Config.SecretKey, "")),
+		configAws.WithHTTPClient(httpClient),
+		configAws.WithEndpointResolverWithOptions(customResolver2),
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to load AWS config for client2: %v", err)
 	}
+
+	// Create client2 with custom options
 	client2 := s3.NewFromConfig(cfg2, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(client2Config.Endpoint)
 		o.UsePathStyle = true
 	})
-	log.Printf("Created client2 with endpoint: %s", client2Config.Endpoint)
 
 	return client1, client2, nil
 }

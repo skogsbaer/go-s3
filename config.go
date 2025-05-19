@@ -16,13 +16,13 @@ func LoadDefaultConfigs(localMinio bool) (client1, client2 S3ClientConfig) {
 			AccessKey: "minioadmin",
 			SecretKey: "minioadmin",
 			Region:    "us-east-1",
-			Endpoint:  "http://localhost:7531",
+			Endpoint:  "https://localhost:7531",
 		}
 		client2 = S3ClientConfig{
 			AccessKey: "minioadmin",
 			SecretKey: "minioadmin",
 			Region:    "us-east-1",
-			Endpoint:  "http://localhost:7532",
+			Endpoint:  "https://localhost:7532",
 		}
 	} else {
 		// Default cloud configuration
