@@ -35,36 +35,15 @@ func TestCreateBucket(t *testing.T) {
 	}
 
 	// 3. Verify bucket creation
-	if *localMinioForTesting {
-		t.Log("Verifying bucket in first MinIO storage...")
-		cmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+testBucket)
-		output1, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Logf("Debug output from first MinIO command: %s", string(output1))
-			t.Fatalf("Failed to verify bucket in first MinIO storage: %v", err)
-		}
-
-		t.Log("Verifying bucket in second MinIO storage...")
-		cmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+testBucket)
-		output2, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Logf("Debug output from second MinIO command: %s", string(output2))
-			t.Fatalf("Failed to verify bucket in second MinIO storage: %v", err)
-		}
-	} else {
-		t.Log("Verifying bucket in first cloud storage (MinIO Play)...")
-		cmd = exec.Command("mc", "ls", "play/"+testBucket)
-		if err := cmd.Run(); err != nil {
-			t.Errorf("Bucket not found in first storage: %v", err)
-		}
-
-		t.Log("Verifying bucket in second cloud storage (Scaleway)...")
-		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
-		if err := cmd.Run(); err != nil {
-			t.Errorf("Bucket not found in second storage: %v", err)
-		}
+	t.Log("Verifying bucket in first storage...")
+	if err := verifyBucketExistsDirectly(t, FirstStorage, *localMinioForTesting, testBucket); err != nil {
+		t.Errorf("%v", err)
 	}
 
+	t.Log("Verifying bucket in second storage...")
+	if err := verifyBucketExistsDirectly(t, SecondStorage, *localMinioForTesting, testBucket); err != nil {
+		t.Errorf("%v", err)
+	}
 }
 
 func TestDeleteBucket(t *testing.T) {
@@ -84,6 +63,17 @@ func TestDeleteBucket(t *testing.T) {
 		t.Fatalf("Failed to create bucket through gateway: %v", err)
 	}
 
+	// Verify bucket exists before deletion
+	t.Log("Verifying bucket exists in first storage...")
+	if err := verifyBucketExistsDirectly(t, FirstStorage, *localMinioForTesting, testBucket); err != nil {
+		t.Errorf("%v", err)
+	}
+
+	t.Log("Verifying bucket exists in second storage...")
+	if err := verifyBucketExistsDirectly(t, SecondStorage, *localMinioForTesting, testBucket); err != nil {
+		t.Errorf("%v", err)
+	}
+
 	// 2. Delete bucket through our gateway
 	t.Log("Deleting bucket through gateway...")
 	cmd = exec.Command("mc", "rb", "local-s3/"+testBucket)
@@ -92,30 +82,14 @@ func TestDeleteBucket(t *testing.T) {
 	}
 
 	// 3. Verify bucket deletion
-	if *localMinioForTesting {
-		t.Log("Verifying bucket deletion in first MinIO storage...")
-		cmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+testBucket)
-		if err := cmd.Run(); err == nil {
-			t.Error("Bucket still exists in first MinIO storage")
-		}
+	t.Log("Verifying bucket deletion in first storage...")
+	if err := verifyBucketDoesNotExistDirectly(t, FirstStorage, *localMinioForTesting, testBucket); err != nil {
+		t.Errorf("%v", err)
+	}
 
-		t.Log("Verifying bucket deletion in second MinIO storage...")
-		cmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+testBucket)
-		if err := cmd.Run(); err == nil {
-			t.Error("Bucket still exists in second MinIO storage")
-		}
-	} else {
-		t.Log("Verifying bucket deletion in first cloud storage (MinIO Play)...")
-		cmd = exec.Command("mc", "ls", "play/"+testBucket)
-		if err := cmd.Run(); err == nil {
-			t.Error("Bucket still exists in first storage")
-		}
-
-		t.Log("Verifying bucket deletion in second cloud storage (Scaleway)...")
-		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
-		if err := cmd.Run(); err == nil {
-			t.Error("Bucket still exists in second storage")
-		}
+	t.Log("Verifying bucket deletion in second storage...")
+	if err := verifyBucketDoesNotExistDirectly(t, SecondStorage, *localMinioForTesting, testBucket); err != nil {
+		t.Errorf("%v", err)
 	}
 }
 
@@ -168,46 +142,14 @@ func TestListEmptyBucket(t *testing.T) {
 	}
 
 	// 4. Verify bucket is empty in both storage systems
-	if *localMinioForTesting {
-		t.Log("Verifying empty bucket in first MinIO storage...")
-		cmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+testBucket)
-		output, err = cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("Failed to list bucket in first MinIO storage: %v", err)
-		}
-		if string(output) != "" {
-			t.Errorf("Expected empty bucket in first MinIO storage, got: %s", string(output))
-		}
+	t.Log("Verifying empty bucket in first storage...")
+	if err := verifyBucketExistsDirectly(t, FirstStorage, *localMinioForTesting, testBucket); err != nil {
+		t.Errorf("%v", err)
+	}
 
-		t.Log("Verifying empty bucket in second MinIO storage...")
-		cmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+testBucket)
-		output, err = cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("Failed to list bucket in second MinIO storage: %v", err)
-		}
-		if string(output) != "" {
-			t.Errorf("Expected empty bucket in second MinIO storage, got: %s", string(output))
-		}
-	} else {
-		t.Log("Verifying empty bucket in first cloud storage (MinIO Play)...")
-		cmd = exec.Command("mc", "ls", "play/"+testBucket)
-		output, err = cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("Failed to list bucket in first cloud storage: %v", err)
-		}
-		if string(output) != "" {
-			t.Errorf("Expected empty bucket in first cloud storage, got: %s", string(output))
-		}
-
-		t.Log("Verifying empty bucket in second cloud storage (Scaleway)...")
-		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
-		output, err = cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("Failed to list bucket in second cloud storage: %v", err)
-		}
-		if string(output) != "" {
-			t.Errorf("Expected empty bucket in second cloud storage, got: %s", string(output))
-		}
+	t.Log("Verifying empty bucket in second storage...")
+	if err := verifyBucketExistsDirectly(t, SecondStorage, *localMinioForTesting, testBucket); err != nil {
+		t.Errorf("%v", err)
 	}
 }
 

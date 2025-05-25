@@ -17,6 +17,88 @@ const (
 	testFile   = "myfile.txt"
 )
 
+// StorageType represents which storage system to verify
+type StorageType int
+
+const (
+	FirstStorage StorageType = iota
+	SecondStorage
+)
+
+// verifyBucketExistsDirectly verifies that a bucket exists in the specified storage system
+// storageType: FirstStorage or SecondStorage
+// local: true for local MinIO, false for cloud storage
+// bucketName: name of the bucket to verify
+func verifyBucketExistsDirectly(t *testing.T, storageType StorageType, local bool, bucketName string) error {
+	var cmd *exec.Cmd
+
+	if local {
+		// Local MinIO verification
+		storage := "firstminio"
+		if storageType == SecondStorage {
+			storage = "secondminio"
+		}
+		cmd = exec.Command("mc", "--insecure", "ls", storage+"/"+bucketName)
+	} else {
+		// Cloud storage verification
+		if storageType == FirstStorage {
+			// MinIO Play
+			cmd = exec.Command("mc", "ls", "play/"+bucketName)
+		} else {
+			// Scaleway
+			cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+bucketName)
+		}
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		storageName := "second"
+		if storageType == FirstStorage {
+			storageName = "first"
+		}
+		return fmt.Errorf("bucket not found in %s storage: %v\nDebug output: %s",
+			storageName,
+			err,
+			string(output))
+	}
+	return nil
+}
+
+// verifyBucketDoesNotExistDirectly verifies that a bucket does not exist in the specified storage system
+func verifyBucketDoesNotExistDirectly(t *testing.T, storageType StorageType, local bool, bucketName string) error {
+	var cmd *exec.Cmd
+
+	if local {
+		// Local MinIO verification
+		storage := "firstminio"
+		if storageType == SecondStorage {
+			storage = "secondminio"
+		}
+		cmd = exec.Command("mc", "--insecure", "ls", storage+"/"+bucketName)
+	} else {
+		// Cloud storage verification
+		if storageType == FirstStorage {
+			// MinIO Play
+			cmd = exec.Command("mc", "ls", "play/"+bucketName)
+		} else {
+			// Scaleway
+			cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+bucketName)
+		}
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		storageName := "second"
+		if storageType == FirstStorage {
+			storageName = "first"
+		}
+		return fmt.Errorf("bucket still exists in %s storage\nDebug output: %s",
+			storageName,
+			string(output))
+	}
+	return nil
+}
+
 // cleanupTestEnvironment removes test buckets from both storage systems
 func cleanupTestEnvironment(t *testing.T) {
 	t.Log("Cleaning up test environment...")
