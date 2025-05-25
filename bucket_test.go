@@ -2,16 +2,30 @@ package main
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 )
 
+func TestBucketDummy(t *testing.T) {
+	t.Log("Verifying bucket in first MinIO storage for debugging only ...")
+	cmd := exec.Command("mc", "ls", "firstminio/"+testBucket)
+	output1, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("Debug output from first MinIO command: %s", string(output1))
+		t.Fatalf("Failed to verify bucket in first MinIO storage: %v", err)
+	}
+}
+
 func TestCreateBucket(t *testing.T) {
 	// 1. Check preconditions
-	t.Log("Setting up test environment...")
+	t.Logf("Setting up test environment... (Using local MinIO: %v)", *localMinioForTesting)
+
 	if err := setupTestEnvironment(t); err != nil {
 		t.Fatalf("Failed to setup test environment: %v", err)
 	}
-	defer cleanupTestEnvironment(t)
+	if !*noCleanup {
+		defer cleanupTestEnvironment(t)
+	}
 
 	// 2. Create bucket through our gateway
 	t.Log("Creating bucket through gateway...")
@@ -21,17 +35,36 @@ func TestCreateBucket(t *testing.T) {
 	}
 
 	// 3. Verify bucket creation
-	t.Log("Verifying bucket in first storage...")
-	cmd = exec.Command("mc", "ls", "play/"+testBucket)
-	if err := cmd.Run(); err != nil {
-		t.Errorf("Bucket not found in first storage: %v", err)
+	if *localMinioForTesting {
+		t.Log("Verifying bucket in first MinIO storage...")
+		cmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+testBucket)
+		output1, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Logf("Debug output from first MinIO command: %s", string(output1))
+			t.Fatalf("Failed to verify bucket in first MinIO storage: %v", err)
+		}
+
+		t.Log("Verifying bucket in second MinIO storage...")
+		cmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+testBucket)
+		output2, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Logf("Debug output from second MinIO command: %s", string(output2))
+			t.Fatalf("Failed to verify bucket in second MinIO storage: %v", err)
+		}
+	} else {
+		t.Log("Verifying bucket in first cloud storage (MinIO Play)...")
+		cmd = exec.Command("mc", "ls", "play/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Errorf("Bucket not found in first storage: %v", err)
+		}
+
+		t.Log("Verifying bucket in second cloud storage (Scaleway)...")
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Errorf("Bucket not found in second storage: %v", err)
+		}
 	}
 
-	t.Log("Verifying bucket in second storage...")
-	cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
-	if err := cmd.Run(); err != nil {
-		t.Errorf("Bucket not found in second storage: %v", err)
-	}
 }
 
 func TestDeleteBucket(t *testing.T) {
@@ -40,7 +73,9 @@ func TestDeleteBucket(t *testing.T) {
 	if err := setupTestEnvironment(t); err != nil {
 		t.Fatalf("Failed to setup test environment: %v", err)
 	}
-	defer cleanupTestEnvironment(t)
+	if !*noCleanup {
+		defer cleanupTestEnvironment(t)
+	}
 
 	// Create bucket through our gateway
 	t.Log("Creating bucket through gateway...")
@@ -57,15 +92,415 @@ func TestDeleteBucket(t *testing.T) {
 	}
 
 	// 3. Verify bucket deletion
-	t.Log("Verifying bucket deletion in first storage...")
-	cmd = exec.Command("mc", "ls", "play/"+testBucket)
-	if err := cmd.Run(); err == nil {
-		t.Error("Bucket still exists in first storage")
+	if *localMinioForTesting {
+		t.Log("Verifying bucket deletion in first MinIO storage...")
+		cmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+testBucket)
+		if err := cmd.Run(); err == nil {
+			t.Error("Bucket still exists in first MinIO storage")
+		}
+
+		t.Log("Verifying bucket deletion in second MinIO storage...")
+		cmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+testBucket)
+		if err := cmd.Run(); err == nil {
+			t.Error("Bucket still exists in second MinIO storage")
+		}
+	} else {
+		t.Log("Verifying bucket deletion in first cloud storage (MinIO Play)...")
+		cmd = exec.Command("mc", "ls", "play/"+testBucket)
+		if err := cmd.Run(); err == nil {
+			t.Error("Bucket still exists in first storage")
+		}
+
+		t.Log("Verifying bucket deletion in second cloud storage (Scaleway)...")
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
+		if err := cmd.Run(); err == nil {
+			t.Error("Bucket still exists in second storage")
+		}
+	}
+}
+
+func TestListEmptyBucket(t *testing.T) {
+	// 1. Setup test environment
+	t.Log("Setting up test environment...")
+	if err := setupTestEnvironment(t); err != nil {
+		t.Fatalf("Failed to setup test environment: %v", err)
+	}
+	if !*noCleanup {
+		defer cleanupTestEnvironment(t)
 	}
 
-	t.Log("Verifying bucket deletion in second storage...")
-	cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
-	if err := cmd.Run(); err == nil {
-		t.Error("Bucket still exists in second storage")
+	// 2. Create bucket directly in both storage systems
+	if *localMinioForTesting {
+		t.Log("Creating bucket in first MinIO storage...")
+		cmd := exec.Command("mc", "--insecure", "mb", "firstminio/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in first MinIO storage: %v", err)
+		}
+
+		t.Log("Creating bucket in second MinIO storage...")
+		cmd = exec.Command("mc", "--insecure", "mb", "secondminio/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in second MinIO storage: %v", err)
+		}
+	} else {
+		t.Log("Creating bucket in first cloud storage (MinIO Play)...")
+		cmd := exec.Command("mc", "mb", "play/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in first cloud storage: %v", err)
+		}
+
+		t.Log("Creating bucket in second cloud storage (Scaleway)...")
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "mb", "s3://"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in second cloud storage: %v", err)
+		}
+	}
+
+	// 3. List bucket content through gateway
+	t.Log("Listing bucket content through gateway...")
+	cmd := exec.Command("mc", "ls", "local-s3/"+testBucket)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to list bucket through gateway: %v", err)
+	}
+	if string(output) != "" {
+		t.Errorf("Expected empty bucket listing through gateway, got: %s", string(output))
+	}
+
+	// 4. Verify bucket is empty in both storage systems
+	if *localMinioForTesting {
+		t.Log("Verifying empty bucket in first MinIO storage...")
+		cmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+testBucket)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Failed to list bucket in first MinIO storage: %v", err)
+		}
+		if string(output) != "" {
+			t.Errorf("Expected empty bucket in first MinIO storage, got: %s", string(output))
+		}
+
+		t.Log("Verifying empty bucket in second MinIO storage...")
+		cmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+testBucket)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Failed to list bucket in second MinIO storage: %v", err)
+		}
+		if string(output) != "" {
+			t.Errorf("Expected empty bucket in second MinIO storage, got: %s", string(output))
+		}
+	} else {
+		t.Log("Verifying empty bucket in first cloud storage (MinIO Play)...")
+		cmd = exec.Command("mc", "ls", "play/"+testBucket)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Failed to list bucket in first cloud storage: %v", err)
+		}
+		if string(output) != "" {
+			t.Errorf("Expected empty bucket in first cloud storage, got: %s", string(output))
+		}
+
+		t.Log("Verifying empty bucket in second cloud storage (Scaleway)...")
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Failed to list bucket in second cloud storage: %v", err)
+		}
+		if string(output) != "" {
+			t.Errorf("Expected empty bucket in second cloud storage, got: %s", string(output))
+		}
+	}
+}
+
+func TestListBucketWithObjects(t *testing.T) {
+	// 1. Setup test environment
+	t.Log("Setting up test environment...")
+	if err := setupTestEnvironment(t); err != nil {
+		t.Fatalf("Failed to setup test environment: %v", err)
+	}
+	if !*noCleanup {
+		defer cleanupTestEnvironment(t)
+	}
+
+	// 2. Create bucket directly in both storage systems
+	if *localMinioForTesting {
+		t.Log("Creating bucket in first MinIO storage...")
+		cmd := exec.Command("mc", "--insecure", "mb", "firstminio/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in first MinIO storage: %v", err)
+		}
+
+		t.Log("Creating bucket in second MinIO storage...")
+		cmd = exec.Command("mc", "--insecure", "mb", "secondminio/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in second MinIO storage: %v", err)
+		}
+	} else {
+		t.Log("Creating bucket in first cloud storage (MinIO Play)...")
+		cmd := exec.Command("mc", "mb", "play/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in first cloud storage: %v", err)
+		}
+
+		t.Log("Creating bucket in second cloud storage (Scaleway)...")
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "mb", "s3://"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in second cloud storage: %v", err)
+		}
+	}
+
+	// 3. Create and upload test files
+	shortName := "a.txt"
+	longName := "thisisaveryveryelongobjectnameinordertotestthelengthoftheobjectname.txt"
+
+	// Create test files
+	if err := createTestFile(t, shortName, "test content for short file"); err != nil {
+		t.Fatalf("Failed to create short test file: %v", err)
+	}
+	defer cleanupTestFile(t, shortName)
+
+	if err := createTestFile(t, longName, "test content for long file"); err != nil {
+		t.Fatalf("Failed to create long test file: %v", err)
+	}
+	defer cleanupTestFile(t, longName)
+
+	// Upload files to storage systems
+	if *localMinioForTesting {
+		// Upload to first MinIO storage
+		cmd := exec.Command("mc", "--insecure", "cp", shortName, "firstminio/"+testBucket+"/"+shortName+".cypher.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to first MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", shortName, "firstminio/"+testBucket+"/"+shortName+".rand.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to first MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", longName, "firstminio/"+testBucket+"/"+longName+".cypher.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to first MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", longName, "firstminio/"+testBucket+"/"+longName+".rand.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to first MinIO storage: %v", err)
+		}
+
+		// Upload to second MinIO storage
+		cmd = exec.Command("mc", "--insecure", "cp", shortName, "secondminio/"+testBucket+"/"+shortName+".cypher.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to second MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", shortName, "secondminio/"+testBucket+"/"+shortName+".rand.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to second MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", longName, "secondminio/"+testBucket+"/"+longName+".cypher.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to second MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", longName, "secondminio/"+testBucket+"/"+longName+".rand.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to second MinIO storage: %v", err)
+		}
+	} else {
+		// Upload to first cloud storage (MinIO Play)
+		cmd := exec.Command("mc", "cp", shortName, "play/"+testBucket+"/"+shortName+".cypher.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to first cloud storage: %v", err)
+		}
+		cmd = exec.Command("mc", "cp", shortName, "play/"+testBucket+"/"+shortName+".rand.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to first cloud storage: %v", err)
+		}
+		cmd = exec.Command("mc", "cp", longName, "play/"+testBucket+"/"+longName+".cypher.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to first cloud storage: %v", err)
+		}
+		cmd = exec.Command("mc", "cp", longName, "play/"+testBucket+"/"+longName+".rand.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to first cloud storage: %v", err)
+		}
+
+		// Upload to second cloud storage (Scaleway)
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", shortName, "s3://"+testBucket+"/"+shortName+".cypher.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to second cloud storage: %v", err)
+		}
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", shortName, "s3://"+testBucket+"/"+shortName+".rand.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to second cloud storage: %v", err)
+		}
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", longName, "s3://"+testBucket+"/"+longName+".cypher.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to second cloud storage: %v", err)
+		}
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", longName, "s3://"+testBucket+"/"+longName+".rand.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to second cloud storage: %v", err)
+		}
+	}
+
+	// 4. List bucket content through gateway
+	t.Log("Listing bucket content through gateway...")
+	listCmd := exec.Command("mc", "ls", "local-s3/"+testBucket)
+	output, err := listCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to list bucket through gateway: %v", err)
+	}
+
+	// 5. Verify the listing contains exactly the two objects
+	outputStr := string(output)
+	if !strings.Contains(outputStr, shortName) {
+		t.Errorf("Expected to find %s in gateway listing, got:\n%s", shortName, outputStr)
+	}
+	if !strings.Contains(outputStr, longName) {
+		t.Errorf("Expected to find %s in gateway listing, got:\n%s", longName, outputStr)
+	}
+
+	// Count the number of lines in the output (each object should be on its own line)
+	lines := strings.Split(strings.TrimSpace(outputStr), "\n")
+	if len(lines) != 2 {
+		t.Errorf("Expected exactly 2 objects in gateway listing, got %d:\n%s", len(lines), outputStr)
+	}
+}
+
+func TestListBucketWithIncompleteObject(t *testing.T) {
+	// 1. Setup test environment
+	t.Log("Setting up test environment...")
+	if err := setupTestEnvironment(t); err != nil {
+		t.Fatalf("Failed to setup test environment: %v", err)
+	}
+	if !*noCleanup {
+		defer cleanupTestEnvironment(t)
+	}
+
+	// 2. Create bucket directly in both storage systems
+	if *localMinioForTesting {
+		t.Log("Creating bucket in first MinIO storage...")
+		cmd := exec.Command("mc", "--insecure", "mb", "firstminio/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in first MinIO storage: %v", err)
+		}
+
+		t.Log("Creating bucket in second MinIO storage...")
+		cmd = exec.Command("mc", "--insecure", "mb", "secondminio/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in second MinIO storage: %v", err)
+		}
+	} else {
+		t.Log("Creating bucket in first cloud storage (MinIO Play)...")
+		cmd := exec.Command("mc", "mb", "play/"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in first cloud storage: %v", err)
+		}
+
+		t.Log("Creating bucket in second cloud storage (Scaleway)...")
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "mb", "s3://"+testBucket)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create bucket in second cloud storage: %v", err)
+		}
+	}
+
+	// 3. Create and upload test files
+	shortName := "a.txt"
+	longName := "thisisaveryveryelongobjectnameinordertotestthelengthoftheobjectname.txt"
+
+	// Create test files
+	if err := createTestFile(t, shortName, "test content for short file"); err != nil {
+		t.Fatalf("Failed to create short test file: %v", err)
+	}
+	defer cleanupTestFile(t, shortName)
+
+	if err := createTestFile(t, longName, "test content for long file"); err != nil {
+		t.Fatalf("Failed to create long test file: %v", err)
+	}
+	defer cleanupTestFile(t, longName)
+
+	// Upload files to storage systems
+	if *localMinioForTesting {
+		// Upload to first MinIO storage
+		cmd := exec.Command("mc", "--insecure", "cp", shortName, "firstminio/"+testBucket+"/"+shortName+".cypher.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to first MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", shortName, "firstminio/"+testBucket+"/"+shortName+".rand.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to first MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", longName, "firstminio/"+testBucket+"/"+longName+".cypher.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to first MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", longName, "firstminio/"+testBucket+"/"+longName+".rand.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to first MinIO storage: %v", err)
+		}
+
+		// Upload to second MinIO storage (missing a.txt.rand.first)
+		cmd = exec.Command("mc", "--insecure", "cp", shortName, "secondminio/"+testBucket+"/"+shortName+".cypher.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to second MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", longName, "secondminio/"+testBucket+"/"+longName+".cypher.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to second MinIO storage: %v", err)
+		}
+		cmd = exec.Command("mc", "--insecure", "cp", longName, "secondminio/"+testBucket+"/"+longName+".rand.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to second MinIO storage: %v", err)
+		}
+	} else {
+		// Upload to first cloud storage (MinIO Play)
+		cmd := exec.Command("mc", "cp", shortName, "play/"+testBucket+"/"+shortName+".cypher.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to first cloud storage: %v", err)
+		}
+		cmd = exec.Command("mc", "cp", shortName, "play/"+testBucket+"/"+shortName+".rand.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to first cloud storage: %v", err)
+		}
+		cmd = exec.Command("mc", "cp", longName, "play/"+testBucket+"/"+longName+".cypher.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to first cloud storage: %v", err)
+		}
+		cmd = exec.Command("mc", "cp", longName, "play/"+testBucket+"/"+longName+".rand.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to first cloud storage: %v", err)
+		}
+
+		// Upload to second cloud storage (Scaleway) - missing a.txt.rand.first
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", shortName, "s3://"+testBucket+"/"+shortName+".cypher.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload short file to second cloud storage: %v", err)
+		}
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", longName, "s3://"+testBucket+"/"+longName+".cypher.second")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to second cloud storage: %v", err)
+		}
+		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", longName, "s3://"+testBucket+"/"+longName+".rand.first")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to upload long file to second cloud storage: %v", err)
+		}
+	}
+
+	// 4. List bucket content through gateway
+	t.Log("Listing bucket content through gateway...")
+	listCmd := exec.Command("mc", "ls", "local-s3/"+testBucket)
+	output, err := listCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to list bucket through gateway: %v", err)
+	}
+
+	// 5. Verify the listing contains only the long object
+	outputStr := string(output)
+	if strings.Contains(outputStr, shortName) {
+		t.Errorf("Expected not to find %s in gateway listing, got:\n%s", shortName, outputStr)
+	}
+	if !strings.Contains(outputStr, longName) {
+		t.Errorf("Expected to find %s in gateway listing, got:\n%s", longName, outputStr)
+	}
+
+	// Count the number of lines in the output (each object should be on its own line)
+	lines := strings.Split(strings.TrimSpace(outputStr), "\n")
+	if len(lines) != 1 {
+		t.Errorf("Expected exactly 1 object in gateway listing, got %d:\n%s", len(lines), outputStr)
 	}
 }

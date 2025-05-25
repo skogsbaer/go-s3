@@ -63,7 +63,6 @@ func (self *MyBackend) ListBuckets(ctx context.Context, input s3response.ListBuc
 			Bucket: commonBuckets,
 		},
 		Owner: s3response.CanonicalUser{
-			ID:          "anonymous",
 			DisplayName: "anonymous",
 		},
 	}, nil

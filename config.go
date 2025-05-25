@@ -13,14 +13,14 @@ func LoadDefaultConfigs(localMinio bool) (client1, client2 S3ClientConfig) {
 	if localMinio {
 		// Local MinIO configuration
 		client1 = S3ClientConfig{
-			AccessKey: "minioadmin",
-			SecretKey: "minioadmin",
+			AccessKey: "firstminio",
+			SecretKey: "firstminio",
 			Region:    "us-east-1",
 			Endpoint:  "https://localhost:7531",
 		}
 		client2 = S3ClientConfig{
-			AccessKey: "minioadmin",
-			SecretKey: "minioadmin",
+			AccessKey: "secondminio",
+			SecretKey: "secondminio",
 			Region:    "us-east-1",
 			Endpoint:  "https://localhost:7532",
 		}

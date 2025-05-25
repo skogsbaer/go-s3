@@ -32,6 +32,9 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
 
+// Command line flags
+var localMinio = flag.Bool("local-minio", false, "Use local MinIO server")
+
 // S3 proxy implementation:
 // $HOME/go/pkg/mod/github.com/versity/versitygw@v1.0.11/backend/s3proxy/s3.go
 type MyBackend struct {
@@ -209,7 +212,6 @@ func createS3Client(client1Config, client2Config S3ClientConfig) (*s3.Client, *s
 
 func main() {
 	// Parse command line flags
-	localMinio := flag.Bool("local-minio", false, "Use local MinIO server")
 	flag.Parse()
 
 	app := fiber.New(fiber.Config{

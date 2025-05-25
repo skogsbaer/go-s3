@@ -18,7 +18,9 @@ func TestObjectUpload(t *testing.T) {
 	if err := setupTestEnvironment(t); err != nil {
 		t.Fatalf("Failed to setup test environment: %v", err)
 	}
-	defer cleanupTestEnvironment(t)
+	if !*noCleanup {
+		defer cleanupTestEnvironment(t)
+	}
 
 	// Create bucket through our gateway
 	t.Log("Creating test bucket...")
@@ -46,7 +48,9 @@ func TestObjectDownload(t *testing.T) {
 	if err := setupTestEnvironment(t); err != nil {
 		t.Fatalf("Failed to setup test environment: %v", err)
 	}
-	defer cleanupTestEnvironment(t)
+	if !*noCleanup {
+		defer cleanupTestEnvironment(t)
+	}
 
 	// Create bucket through our gateway
 	t.Log("Creating test bucket...")
@@ -96,7 +100,9 @@ func TestListBucket(t *testing.T) {
 	if err := setupTestEnvironment(t); err != nil {
 		t.Fatalf("Failed to setup test environment: %v", err)
 	}
-	defer cleanupTestEnvironment(t)
+	if !*noCleanup {
+		defer cleanupTestEnvironment(t)
+	}
 
 	// Create bucket through our gateway
 	t.Log("Creating test bucket...")
