@@ -412,9 +412,16 @@ func (self *MyBackend) PutObject(
 	}
 
 	// Return a success response
+	var etag, versionId string
+	if outputs[0].ETag != nil {
+		etag = *outputs[0].ETag
+	}
+	if outputs[0].VersionId != nil {
+		versionId = *outputs[0].VersionId
+	}
 	return s3response.PutObjectOutput{
-		ETag:              *outputs[0].ETag,
-		VersionID:         *outputs[0].VersionId,
+		ETag:              etag,
+		VersionID:         versionId,
 		ChecksumCRC32:     outputs[0].ChecksumCRC32,
 		ChecksumCRC32C:    outputs[0].ChecksumCRC32C,
 		ChecksumCRC64NVME: outputs[0].ChecksumCRC64NVME,

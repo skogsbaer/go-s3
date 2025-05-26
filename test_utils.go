@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 // Test flags
@@ -329,6 +330,109 @@ func uploadObjectDirectly(t *testing.T, local bool, bucketName string, objectNam
 	output, err = secondCmd.CombinedOutput()
 	if err != nil {
 		secondErr = fmt.Errorf("failed to upload object to second storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	}
+
+	return firstErr, secondErr
+}
+
+// setupTestEnvironmentWithBucket ensures test buckets are clean and creates a new bucket
+// bucketName: name of the bucket to create
+// Returns error if setup or bucket creation fails
+func setupTestEnvironmentWithBucket(t *testing.T, bucketName string) error {
+	// First, clean up any existing test environment
+	if err := setupTestEnvironment(t); err != nil {
+		return fmt.Errorf("failed to setup test environment: %v", err)
+	}
+
+	// Create the bucket in both storage systems
+	firstErr, secondErr := createBucketDirectly(t, *localMinioForTesting, bucketName)
+	if firstErr != nil {
+		return fmt.Errorf("failed to create bucket in first storage: %v", firstErr)
+	}
+	if secondErr != nil {
+		return fmt.Errorf("failed to create bucket in second storage: %v", secondErr)
+	}
+
+	// Verify the bucket exists in both storage systems
+	firstErr, secondErr = verifyBucketExistsDirectly(t, *localMinioForTesting, bucketName)
+	if firstErr != nil {
+		return fmt.Errorf("failed to verify bucket in first storage: %v", firstErr)
+	}
+	if secondErr != nil {
+		return fmt.Errorf("failed to verify bucket in second storage: %v", secondErr)
+	}
+
+	return nil
+}
+
+func uploadTestFile(t *testing.T) error {
+	// Create a test file
+	content := fmt.Sprintf("Test content created at %s", time.Now().Format(time.RFC3339))
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to create test file: %v", err)
+	}
+	defer cleanupTestFile(t, testFile)
+
+	// Upload through gateway using mc put
+	cmd := exec.Command("mc", "put",
+		testFile,
+		"local-s3/"+testBucket+"/")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to upload file through gateway: %v", err)
+	}
+
+	return nil
+}
+
+func verifyDownloadedFile(t *testing.T, filename string) error {
+	// Check if file exists
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		return fmt.Errorf("downloaded file does not exist: %v", err)
+	}
+
+	// Read and verify file content
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("failed to read downloaded file: %v", err)
+	}
+
+	// Basic content verification (file should not be empty)
+	if len(content) == 0 {
+		return fmt.Errorf("downloaded file is empty")
+	}
+
+	return nil
+}
+
+func verifyObjectsDirectly(t *testing.T, local bool, bucketName string, objectName string) (error, error) {
+	var firstErr, secondErr error
+
+	// Check first storage
+	var firstCmd *exec.Cmd
+	if local {
+		firstCmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+bucketName+"/"+objectName)
+	} else {
+		firstCmd = exec.Command("mc", "ls", "play/"+bucketName+"/"+objectName)
+	}
+	output, err := firstCmd.CombinedOutput()
+	if err != nil {
+		firstErr = fmt.Errorf("file not found in first storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	}
+
+	// Check second storage
+	var secondCmd *exec.Cmd
+	if local {
+		secondCmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+bucketName+"/"+objectName)
+	} else {
+		secondCmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+bucketName+"/"+objectName)
+	}
+	output, err = secondCmd.CombinedOutput()
+	if err != nil {
+		secondErr = fmt.Errorf("file not found in second storage: %v\nDebug output: %s",
 			err,
 			string(output))
 	}

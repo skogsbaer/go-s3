@@ -47,32 +47,12 @@ func TestCreateBucket(t *testing.T) {
 
 func TestDeleteBucket(t *testing.T) {
 	// 1. Ensure bucket exists in both storages
-	t.Log("Setting up test environment...")
-	if err := setupTestEnvironment(t); err != nil {
-		t.Fatalf("Failed to setup test environment: %v", err)
+	t.Log("Setting up test environment and creating bucket...")
+	if err := setupTestEnvironmentWithBucket(t, testBucket); err != nil {
+		t.Fatalf("Failed to setup test environment and create bucket: %v", err)
 	}
 	if !*noCleanup {
 		defer cleanupTestEnvironment(t)
-	}
-
-	// Create bucket directly in both storage systems
-	t.Log("Creating buckets in both storage systems...")
-	firstErr, secondErr := createBucketDirectly(t, *localMinioForTesting, testBucket)
-	if firstErr != nil {
-		t.Fatalf("%v", firstErr)
-	}
-	if secondErr != nil {
-		t.Fatalf("%v", secondErr)
-	}
-
-	// Verify bucket exists before deletion
-	t.Log("Verifying bucket exists in both storage systems...")
-	firstErr, secondErr = verifyBucketExistsDirectly(t, *localMinioForTesting, testBucket)
-	if firstErr != nil {
-		t.Errorf("%v", firstErr)
-	}
-	if secondErr != nil {
-		t.Errorf("%v", secondErr)
 	}
 
 	// 2. Delete bucket through our gateway
@@ -84,7 +64,7 @@ func TestDeleteBucket(t *testing.T) {
 
 	// 3. Verify bucket deletion
 	t.Log("Verifying bucket deletion in both storage systems...")
-	firstErr, secondErr = verifyBucketDoesNotExistDirectly(t, *localMinioForTesting, testBucket)
+	firstErr, secondErr := verifyBucketDoesNotExistDirectly(t, *localMinioForTesting, testBucket)
 	if firstErr != nil {
 		t.Errorf("%v", firstErr)
 	}
@@ -94,26 +74,16 @@ func TestDeleteBucket(t *testing.T) {
 }
 
 func TestListEmptyBucket(t *testing.T) {
-	// 1. Setup test environment
-	t.Log("Setting up test environment...")
-	if err := setupTestEnvironment(t); err != nil {
-		t.Fatalf("Failed to setup test environment: %v", err)
+	// 1. Setup test environment and create bucket
+	t.Log("Setting up test environment and creating bucket...")
+	if err := setupTestEnvironmentWithBucket(t, testBucket); err != nil {
+		t.Fatalf("Failed to setup test environment and create bucket: %v", err)
 	}
 	if !*noCleanup {
 		defer cleanupTestEnvironment(t)
 	}
 
-	// 2. Create bucket directly in both storage systems
-	t.Log("Creating buckets in both storage systems...")
-	firstErr, secondErr := createBucketDirectly(t, *localMinioForTesting, testBucket)
-	if firstErr != nil {
-		t.Fatalf("%v", firstErr)
-	}
-	if secondErr != nil {
-		t.Fatalf("%v", secondErr)
-	}
-
-	// 3. List bucket content through gateway
+	// 2. List bucket content through gateway
 	t.Log("Listing bucket content through gateway...")
 	cmd := exec.Command("mc", "ls", "local-s3/"+testBucket)
 	output, err := cmd.CombinedOutput()
@@ -124,9 +94,9 @@ func TestListEmptyBucket(t *testing.T) {
 		t.Errorf("Expected empty bucket listing through gateway, got: %s", string(output))
 	}
 
-	// 4. Verify bucket is empty in both storage systems
+	// 3. Verify bucket is empty in both storage systems
 	t.Log("Verifying empty buckets in both storage systems...")
-	firstErr, secondErr = verifyBucketIsEmptyDirectly(t, *localMinioForTesting, testBucket)
+	firstErr, secondErr := verifyBucketIsEmptyDirectly(t, *localMinioForTesting, testBucket)
 	if firstErr != nil {
 		t.Errorf("%v", firstErr)
 	}
@@ -250,18 +220,20 @@ func TestListBucketWithIncompleteObject(t *testing.T) {
 	}
 	defer cleanupTestFile(t, longName)
 
-	// Upload files to storage systems
+	// Upload short file with all suffixes using uploadObjectDirectly
+	t.Log("Uploading short file to both storage systems...")
+	firstErr, secondErr = uploadObjectDirectly(t, *localMinioForTesting, testBucket, shortName, shortName)
+	if firstErr != nil {
+		t.Fatalf("Failed to upload short file: %v", firstErr)
+	}
+	if secondErr != nil {
+		t.Fatalf("Failed to upload short file: %v", secondErr)
+	}
+
+	// Upload long file with incomplete set of suffixes
 	if *localMinioForTesting {
 		// Upload to first MinIO storage
-		cmd := exec.Command("mc", "--insecure", "cp", shortName, "firstminio/"+testBucket+"/"+shortName+".cypher.first")
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to upload short file to first MinIO storage: %v", err)
-		}
-		cmd = exec.Command("mc", "--insecure", "cp", shortName, "firstminio/"+testBucket+"/"+shortName+".rand.second")
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to upload short file to first MinIO storage: %v", err)
-		}
-		cmd = exec.Command("mc", "--insecure", "cp", longName, "firstminio/"+testBucket+"/"+longName+".cypher.first")
+		cmd := exec.Command("mc", "--insecure", "cp", longName, "firstminio/"+testBucket+"/"+longName+".cypher.first")
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("Failed to upload long file to first MinIO storage: %v", err)
 		}
@@ -271,29 +243,13 @@ func TestListBucketWithIncompleteObject(t *testing.T) {
 		}
 
 		// Upload to second MinIO storage (missing a.txt.rand.first)
-		cmd = exec.Command("mc", "--insecure", "cp", shortName, "secondminio/"+testBucket+"/"+shortName+".cypher.second")
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to upload short file to second MinIO storage: %v", err)
-		}
 		cmd = exec.Command("mc", "--insecure", "cp", longName, "secondminio/"+testBucket+"/"+longName+".cypher.second")
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to upload long file to second MinIO storage: %v", err)
-		}
-		cmd = exec.Command("mc", "--insecure", "cp", longName, "secondminio/"+testBucket+"/"+longName+".rand.first")
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("Failed to upload long file to second MinIO storage: %v", err)
 		}
 	} else {
 		// Upload to first cloud storage (MinIO Play)
-		cmd := exec.Command("mc", "cp", shortName, "play/"+testBucket+"/"+shortName+".cypher.first")
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to upload short file to first cloud storage: %v", err)
-		}
-		cmd = exec.Command("mc", "cp", shortName, "play/"+testBucket+"/"+shortName+".rand.second")
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to upload short file to first cloud storage: %v", err)
-		}
-		cmd = exec.Command("mc", "cp", longName, "play/"+testBucket+"/"+longName+".cypher.first")
+		cmd := exec.Command("mc", "cp", longName, "play/"+testBucket+"/"+longName+".cypher.first")
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("Failed to upload long file to first cloud storage: %v", err)
 		}
@@ -303,18 +259,11 @@ func TestListBucketWithIncompleteObject(t *testing.T) {
 		}
 
 		// Upload to second cloud storage (Scaleway) - missing a.txt.rand.first
-		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", shortName, "s3://"+testBucket+"/"+shortName+".cypher.second")
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to upload short file to second cloud storage: %v", err)
-		}
 		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", longName, "s3://"+testBucket+"/"+longName+".cypher.second")
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("Failed to upload long file to second cloud storage: %v", err)
 		}
-		cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", longName, "s3://"+testBucket+"/"+longName+".rand.first")
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to upload long file to second cloud storage: %v", err)
-		}
+
 	}
 
 	// 4. List bucket content through gateway
@@ -325,13 +274,13 @@ func TestListBucketWithIncompleteObject(t *testing.T) {
 		t.Fatalf("Failed to list bucket through gateway: %v", err)
 	}
 
-	// 5. Verify the listing contains only the long object
+	// 5. Verify the listing contains only the short object
 	outputStr := string(output)
-	if strings.Contains(outputStr, shortName) {
-		t.Errorf("Expected not to find %s in gateway listing, got:\n%s", shortName, outputStr)
+	if !strings.Contains(outputStr, shortName) {
+		t.Errorf("Expected to find %s in gateway listing, got:\n%s", shortName, outputStr)
 	}
-	if !strings.Contains(outputStr, longName) {
-		t.Errorf("Expected to find %s in gateway listing, got:\n%s", longName, outputStr)
+	if strings.Contains(outputStr, longName) {
+		t.Errorf("Expected not to find %s in gateway listing, got:\n%s", longName, outputStr)
 	}
 
 	// Count the number of lines in the output (each object should be on its own line)
