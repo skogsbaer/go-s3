@@ -2,7 +2,7 @@ package main
 
 import (
 	"os/exec"
-	"strings"
+	//"strings"
 	"testing"
 	"time"
 )
@@ -86,6 +86,7 @@ func TestObjectDownload(t *testing.T) {
 	}
 }
 
+/*
 func TestListBucket(t *testing.T) {
 	// 1. Setup: Create or clean bucket
 	t.Log("Setting up test environment...")
@@ -143,3 +144,4 @@ func TestListBucket(t *testing.T) {
 		t.Errorf("Expected file not found in gateway listing. Got:\n%s", gatewayFiles)
 	}
 }
+*/

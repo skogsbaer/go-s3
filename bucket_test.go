@@ -6,16 +6,17 @@ import (
 	"testing"
 )
 
-func TestBucketDummy(t *testing.T) {
-	t.Log("Verifying bucket in first MinIO storage for debugging only ...")
-	cmd := exec.Command("mc", "ls", "firstminio/"+testBucket)
-	output1, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("Debug output from first MinIO command: %s", string(output1))
-		t.Fatalf("Failed to verify bucket in first MinIO storage: %v", err)
+/*
+	func TestBucketDummy(t *testing.T) {
+		t.Log("Verifying bucket in first MinIO storage for debugging only ...")
+		cmd := exec.Command("mc", "ls", "firstminio/"+testBucket)
+		output1, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Logf("Debug output from first MinIO command: %s", string(output1))
+			t.Fatalf("Failed to verify bucket in first MinIO storage: %v", err)
+		}
 	}
-}
-
+*/
 func TestCreateBucket(t *testing.T) {
 	// 1. Check preconditions
 	t.Logf("Setting up test environment... (Using local MinIO: %v)", *localMinioForTesting)
@@ -106,26 +107,16 @@ func TestListEmptyBucket(t *testing.T) {
 }
 
 func TestListBucketWithObjects(t *testing.T) {
-	// 1. Setup test environment
-	t.Log("Setting up test environment...")
-	if err := setupTestEnvironment(t); err != nil {
-		t.Fatalf("Failed to setup test environment: %v", err)
+	// 1. Setup test environment and create bucket
+	t.Log("Setting up test environment and creating bucket...")
+	if err := setupTestEnvironmentWithBucket(t, testBucket); err != nil {
+		t.Fatalf("Failed to setup test environment and create bucket: %v", err)
 	}
 	if !*noCleanup {
 		defer cleanupTestEnvironment(t)
 	}
 
-	// 2. Create bucket directly in both storage systems
-	t.Log("Creating buckets in both storage systems...")
-	firstErr, secondErr := createBucketDirectly(t, *localMinioForTesting, testBucket)
-	if firstErr != nil {
-		t.Fatalf("%v", firstErr)
-	}
-	if secondErr != nil {
-		t.Fatalf("%v", secondErr)
-	}
-
-	// 3. Create and upload test files
+	// 2. Create and upload test files
 	shortName := "a.txt"
 	longName := "thisisaveryveryelongobjectnameinordertotestthelengthoftheobjectname.txt"
 
@@ -144,7 +135,7 @@ func TestListBucketWithObjects(t *testing.T) {
 	t.Log("Uploading files to both storage systems...")
 
 	// Upload short file
-	firstErr, secondErr = uploadObjectDirectly(t, *localMinioForTesting, testBucket, shortName, shortName)
+	firstErr, secondErr := uploadObjectDirectly(t, *localMinioForTesting, testBucket, shortName, shortName)
 	if firstErr != nil {
 		t.Fatalf("Failed to upload short file: %v", firstErr)
 	}
@@ -161,7 +152,7 @@ func TestListBucketWithObjects(t *testing.T) {
 		t.Fatalf("Failed to upload long file: %v", secondErr)
 	}
 
-	// 4. List bucket content through gateway
+	// 3. List bucket content through gateway
 	t.Log("Listing bucket content through gateway...")
 	listCmd := exec.Command("mc", "ls", "local-s3/"+testBucket)
 	output, err := listCmd.CombinedOutput()
@@ -169,7 +160,7 @@ func TestListBucketWithObjects(t *testing.T) {
 		t.Fatalf("Failed to list bucket through gateway: %v", err)
 	}
 
-	// 5. Verify the listing contains exactly the two objects
+	// 4. Verify the listing contains exactly the two objects
 	outputStr := string(output)
 	if !strings.Contains(outputStr, shortName) {
 		t.Errorf("Expected to find %s in gateway listing, got:\n%s", shortName, outputStr)
@@ -186,26 +177,16 @@ func TestListBucketWithObjects(t *testing.T) {
 }
 
 func TestListBucketWithIncompleteObject(t *testing.T) {
-	// 1. Setup test environment
-	t.Log("Setting up test environment...")
-	if err := setupTestEnvironment(t); err != nil {
-		t.Fatalf("Failed to setup test environment: %v", err)
+	// 1. Setup test environment with bucket
+	t.Log("Setting up test environment with bucket...")
+	if err := setupTestEnvironmentWithBucket(t, testBucket); err != nil {
+		t.Fatalf("Failed to setup test environment with bucket: %v", err)
 	}
 	if !*noCleanup {
 		defer cleanupTestEnvironment(t)
 	}
 
-	// 2. Create bucket directly in both storage systems
-	t.Log("Creating buckets in both storage systems...")
-	firstErr, secondErr := createBucketDirectly(t, *localMinioForTesting, testBucket)
-	if firstErr != nil {
-		t.Fatalf("Failed to create bucket in first storage: %v", firstErr)
-	}
-	if secondErr != nil {
-		t.Fatalf("Failed to create bucket in second storage: %v", secondErr)
-	}
-
-	// 3. Create and upload test files
+	// 2. Create and upload test files
 	shortName := "a.txt"
 	longName := "thisisaveryveryelongobjectnameinordertotestthelengthoftheobjectname.txt"
 
@@ -222,7 +203,7 @@ func TestListBucketWithIncompleteObject(t *testing.T) {
 
 	// Upload short file with all suffixes using uploadObjectDirectly
 	t.Log("Uploading short file to both storage systems...")
-	firstErr, secondErr = uploadObjectDirectly(t, *localMinioForTesting, testBucket, shortName, shortName)
+	firstErr, secondErr := uploadObjectDirectly(t, *localMinioForTesting, testBucket, shortName, shortName)
 	if firstErr != nil {
 		t.Fatalf("Failed to upload short file: %v", firstErr)
 	}
@@ -266,7 +247,7 @@ func TestListBucketWithIncompleteObject(t *testing.T) {
 
 	}
 
-	// 4. List bucket content through gateway
+	// 3. List bucket content through gateway
 	t.Log("Listing bucket content through gateway...")
 	listCmd := exec.Command("mc", "ls", "local-s3/"+testBucket)
 	output, err := listCmd.CombinedOutput()
@@ -274,7 +255,7 @@ func TestListBucketWithIncompleteObject(t *testing.T) {
 		t.Fatalf("Failed to list bucket through gateway: %v", err)
 	}
 
-	// 5. Verify the listing contains only the short object
+	// 4. Verify the listing contains only the short object
 	outputStr := string(output)
 	if !strings.Contains(outputStr, shortName) {
 		t.Errorf("Expected to find %s in gateway listing, got:\n%s", shortName, outputStr)
