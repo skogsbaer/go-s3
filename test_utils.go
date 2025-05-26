@@ -25,78 +25,122 @@ const (
 	SecondStorage
 )
 
-// verifyBucketExistsDirectly verifies that a bucket exists in the specified storage system
-// storageType: FirstStorage or SecondStorage
+// verifyBucketExistsDirectly verifies that a bucket exists in both storage systems
 // local: true for local MinIO, false for cloud storage
 // bucketName: name of the bucket to verify
-func verifyBucketExistsDirectly(t *testing.T, storageType StorageType, local bool, bucketName string) error {
-	var cmd *exec.Cmd
+// Returns both errors if any occur
+func verifyBucketExistsDirectly(t *testing.T, local bool, bucketName string) (error, error) {
+	var firstErr, secondErr error
 
+	// Check first storage
+	var firstCmd *exec.Cmd
 	if local {
-		// Local MinIO verification
-		storage := "firstminio"
-		if storageType == SecondStorage {
-			storage = "secondminio"
-		}
-		cmd = exec.Command("mc", "--insecure", "ls", storage+"/"+bucketName)
+		firstCmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+bucketName)
 	} else {
-		// Cloud storage verification
-		if storageType == FirstStorage {
-			// MinIO Play
-			cmd = exec.Command("mc", "ls", "play/"+bucketName)
-		} else {
-			// Scaleway
-			cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+bucketName)
-		}
+		firstCmd = exec.Command("mc", "ls", "play/"+bucketName)
 	}
-
-	output, err := cmd.CombinedOutput()
+	output, err := firstCmd.CombinedOutput()
 	if err != nil {
-		storageName := "second"
-		if storageType == FirstStorage {
-			storageName = "first"
-		}
-		return fmt.Errorf("bucket not found in %s storage: %v\nDebug output: %s",
-			storageName,
+		firstErr = fmt.Errorf("bucket not found in first storage: %v\nDebug output: %s",
 			err,
 			string(output))
 	}
-	return nil
-}
 
-// verifyBucketDoesNotExistDirectly verifies that a bucket does not exist in the specified storage system
-func verifyBucketDoesNotExistDirectly(t *testing.T, storageType StorageType, local bool, bucketName string) error {
-	var cmd *exec.Cmd
-
+	// Check second storage
+	var secondCmd *exec.Cmd
 	if local {
-		// Local MinIO verification
-		storage := "firstminio"
-		if storageType == SecondStorage {
-			storage = "secondminio"
-		}
-		cmd = exec.Command("mc", "--insecure", "ls", storage+"/"+bucketName)
+		secondCmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+bucketName)
 	} else {
-		// Cloud storage verification
-		if storageType == FirstStorage {
-			// MinIO Play
-			cmd = exec.Command("mc", "ls", "play/"+bucketName)
-		} else {
-			// Scaleway
-			cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+bucketName)
-		}
+		secondCmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+bucketName)
 	}
-
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		storageName := "second"
-		if storageType == FirstStorage {
-			storageName = "first"
-		}
-		return fmt.Errorf("bucket still exists in %s storage\nDebug output: %s",
-			storageName,
+	output, err = secondCmd.CombinedOutput()
+	if err != nil {
+		secondErr = fmt.Errorf("bucket not found in second storage: %v\nDebug output: %s",
+			err,
 			string(output))
 	}
-	return nil
+
+	return firstErr, secondErr
+}
+
+// verifyBucketDoesNotExistDirectly verifies that a bucket does not exist in both storage systems
+// local: true for local MinIO, false for cloud storage
+// bucketName: name of the bucket to verify
+// Returns both errors if any occur
+func verifyBucketDoesNotExistDirectly(t *testing.T, local bool, bucketName string) (error, error) {
+	var firstErr, secondErr error
+
+	// Check first storage
+	var firstCmd *exec.Cmd
+	if local {
+		firstCmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+bucketName)
+	} else {
+		firstCmd = exec.Command("mc", "ls", "play/"+bucketName)
+	}
+	output, err := firstCmd.CombinedOutput()
+	if err == nil {
+		firstErr = fmt.Errorf("bucket still exists in first storage\nDebug output: %s",
+			string(output))
+	}
+
+	// Check second storage
+	var secondCmd *exec.Cmd
+	if local {
+		secondCmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+bucketName)
+	} else {
+		secondCmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+bucketName)
+	}
+	output, err = secondCmd.CombinedOutput()
+	if err == nil {
+		secondErr = fmt.Errorf("bucket still exists in second storage\nDebug output: %s",
+			string(output))
+	}
+
+	return firstErr, secondErr
+}
+
+// verifyBucketIsEmptyDirectly verifies that a bucket exists and is empty in both storage systems
+// local: true for local MinIO, false for cloud storage
+// bucketName: name of the bucket to verify
+// Returns both errors if any occur
+func verifyBucketIsEmptyDirectly(t *testing.T, local bool, bucketName string) (error, error) {
+	var firstErr, secondErr error
+
+	// Check first storage
+	var firstCmd *exec.Cmd
+	if local {
+		firstCmd = exec.Command("mc", "--insecure", "ls", "firstminio/"+bucketName)
+	} else {
+		firstCmd = exec.Command("mc", "ls", "play/"+bucketName)
+	}
+	output, err := firstCmd.CombinedOutput()
+	if err != nil {
+		firstErr = fmt.Errorf("bucket not found in first storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	} else if string(output) != "" {
+		firstErr = fmt.Errorf("bucket is not empty in first storage\nDebug output: %s",
+			string(output))
+	}
+
+	// Check second storage
+	var secondCmd *exec.Cmd
+	if local {
+		secondCmd = exec.Command("mc", "--insecure", "ls", "secondminio/"+bucketName)
+	} else {
+		secondCmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+bucketName)
+	}
+	output, err = secondCmd.CombinedOutput()
+	if err != nil {
+		secondErr = fmt.Errorf("bucket not found in second storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	} else if string(output) != "" {
+		secondErr = fmt.Errorf("bucket is not empty in second storage\nDebug output: %s",
+			string(output))
+	}
+
+	return firstErr, secondErr
 }
 
 // cleanupTestEnvironment removes test buckets from both storage systems
@@ -186,4 +230,108 @@ func createTestFile(t *testing.T, filename string, content string) error {
 		return fmt.Errorf("failed to create test file: %v", err)
 	}
 	return nil
+}
+
+// createBucketDirectly creates a bucket in both storage systems
+// local: true for local MinIO, false for cloud storage
+// bucketName: name of the bucket to create
+// Returns both errors if any occur
+func createBucketDirectly(t *testing.T, local bool, bucketName string) (error, error) {
+	var firstErr, secondErr error
+
+	// Create in first storage
+	var firstCmd *exec.Cmd
+	if local {
+		firstCmd = exec.Command("mc", "--insecure", "mb", "firstminio/"+bucketName)
+	} else {
+		firstCmd = exec.Command("mc", "mb", "play/"+bucketName)
+	}
+	output, err := firstCmd.CombinedOutput()
+	if err != nil {
+		firstErr = fmt.Errorf("failed to create bucket in first storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	}
+
+	// Create in second storage
+	var secondCmd *exec.Cmd
+	if local {
+		secondCmd = exec.Command("mc", "--insecure", "mb", "secondminio/"+bucketName)
+	} else {
+		secondCmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "mb", "s3://"+bucketName)
+	}
+	output, err = secondCmd.CombinedOutput()
+	if err != nil {
+		secondErr = fmt.Errorf("failed to create bucket in second storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	}
+
+	return firstErr, secondErr
+}
+
+// uploadObjectDirectly uploads an object to both storage systems
+// local: true for local MinIO, false for cloud storage
+// bucketName: name of the bucket to upload to
+// objectName: name of the object to upload
+// objectPath: path to the file to upload
+// Returns both errors if any occur
+func uploadObjectDirectly(t *testing.T, local bool, bucketName string, objectName string, objectPath string) (error, error) {
+	var firstErr, secondErr error
+
+	// Upload to first storage with cypher suffix
+	var firstCmd *exec.Cmd
+	if local {
+		firstCmd = exec.Command("mc", "--insecure", "cp", objectPath, "firstminio/"+bucketName+"/"+objectName+".cypher.first")
+	} else {
+		firstCmd = exec.Command("mc", "cp", objectPath, "play/"+bucketName+"/"+objectName+".cypher.first")
+	}
+	output, err := firstCmd.CombinedOutput()
+	if err != nil {
+		firstErr = fmt.Errorf("failed to upload object to first storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	}
+
+	// Upload to first storage with rand suffix
+	if local {
+		firstCmd = exec.Command("mc", "--insecure", "cp", objectPath, "firstminio/"+bucketName+"/"+objectName+".rand.second")
+	} else {
+		firstCmd = exec.Command("mc", "cp", objectPath, "play/"+bucketName+"/"+objectName+".rand.second")
+	}
+	output, err = firstCmd.CombinedOutput()
+	if err != nil {
+		firstErr = fmt.Errorf("failed to upload object to first storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	}
+
+	// Upload to second storage with cypher suffix
+	var secondCmd *exec.Cmd
+	if local {
+		secondCmd = exec.Command("mc", "--insecure", "cp", objectPath, "secondminio/"+bucketName+"/"+objectName+".cypher.second")
+	} else {
+		secondCmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", objectPath, "s3://"+bucketName+"/"+objectName+".cypher.second")
+	}
+	output, err = secondCmd.CombinedOutput()
+	if err != nil {
+		secondErr = fmt.Errorf("failed to upload object to second storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	}
+
+	// Upload to second storage with rand suffix
+	if local {
+		secondCmd = exec.Command("mc", "--insecure", "cp", objectPath, "secondminio/"+bucketName+"/"+objectName+".rand.first")
+	} else {
+		secondCmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "cp", objectPath, "s3://"+bucketName+"/"+objectName+".rand.first")
+	}
+	output, err = secondCmd.CombinedOutput()
+	if err != nil {
+		secondErr = fmt.Errorf("failed to upload object to second storage: %v\nDebug output: %s",
+			err,
+			string(output))
+	}
+
+	return firstErr, secondErr
 }
