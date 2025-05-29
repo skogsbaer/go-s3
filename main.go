@@ -214,6 +214,12 @@ func main() {
 	// Parse command line flags
 	flag.Parse()
 
+	// Create standard log directory if it doesn't exist
+	logDir := "/var/log/go-s3"
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		log.Fatalf("Failed to create log directory: %v", err)
+	}
+
 	app := fiber.New(fiber.Config{
 		AppName:               "go-s3",
 		ServerHeader:          "GO_S3",
@@ -287,11 +293,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("setup iam failed: %v", err)
 	}
+
+	// Use standard log file paths
+	accessLogPath := filepath.Join(logDir, "access.log")
+	adminLogPath := filepath.Join(logDir, "admin.log")
+
 	loggers, err := s3log.InitLogger(&s3log.LogConfig{
-		LogFile:      "access.log",
+		LogFile:      accessLogPath,
 		WebhookURL:   "",
-		AdminLogFile: "admin.log",
+		AdminLogFile: adminLogPath,
 	})
+	if err != nil {
+		log.Fatalf("Failed to initialize loggers: %v", err)
+	}
+
 	_, err = s3api.New(
 		app,
 		backend,
@@ -310,6 +325,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("s3api init failed: %v", err)
 	}
-	log.Println("S3-compatible server running on http://localhost:9000")
+	log.Printf("S3-compatible server running on http://localhost:9000")
+	log.Printf("Log files are located in: %s", logDir)
 	log.Fatal(app.Listen(":9000"))
 }

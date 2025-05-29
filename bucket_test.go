@@ -6,17 +6,10 @@ import (
 	"testing"
 )
 
-/*
-	func TestBucketDummy(t *testing.T) {
-		t.Log("Verifying bucket in first MinIO storage for debugging only ...")
-		cmd := exec.Command("mc", "ls", "firstminio/"+testBucket)
-		output1, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Logf("Debug output from first MinIO command: %s", string(output1))
-			t.Fatalf("Failed to verify bucket in first MinIO storage: %v", err)
-		}
-	}
-*/
+func TestBucketDummy(t *testing.T) {
+	t.Log("Dummy test for testing ...")
+}
+
 func TestCreateBucket(t *testing.T) {
 	// 1. Check preconditions
 	t.Logf("Setting up test environment... (Using local MinIO: %v)", *localMinioForTesting)
