@@ -224,7 +224,10 @@ func main() {
 	})
 
 	// Load S3 client configs
-	client1Config, client2Config := LoadDefaultConfigs(*localMinio)
+	client1Config, client2Config, err := LoadDefaultConfigs(*localMinio)
+	if err != nil {
+		log.Fatalf("Failed to load configurations: %v", err)
+	}
 
 	log.Printf("Initializing S3 clients...")
 	log.Printf("Client1 config - Endpoint: %s, Region: %s", client1Config.Endpoint, client1Config.Region)

@@ -11,11 +11,34 @@ but only as dummy implementation.
 
 ## Setup Instructions
 
-Just run the server via
+Just run the server in case of local s3 storages and local testing
 
 ```bash
-go run .
+go run . --local-minio \
+  --s3-local-1-endpoint="https://localhost:7531" \
+  --s3-local-1-region="us-east-1" \
+  --s3-local-1-access="firstminio" \
+  --s3-local-1-secret="firstminio" \
+  --s3-local-2-endpoint="https://localhost:7532" \
+  --s3-local-2-region="us-east-1" \
+  --s3-local-2-access="secondminio" \
+  --s3-local-2-secret="secondminio"
 ```
+
+Just run the server in case of remote s3 storages and remote testing
+
+```bash
+go run . \
+  --s3-local-1-endpoint="https://localhost:7531" \
+  --s3-local-1-region="us-east-1" \
+  --s3-local-1-access="firstminio" \
+  --s3-local-1-secret="firstminio" \
+  --s3-local-2-endpoint="https://localhost:7532" \
+  --s3-local-2-region="us-east-1" \
+  --s3-local-2-access="secondminio" \
+  --s3-local-2-secret="secondminio"
+```
+
 
 Server starts on `http://localhost:9000`
 
