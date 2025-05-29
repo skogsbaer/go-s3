@@ -218,7 +218,31 @@ func setupTestEnvironment(t *testing.T) error {
 	return nil
 }
 
-// cleanupTestFile removes a test file from the filesystem
+// createTempFile creates a file in the system's temp directory
+func createTempFile(t *testing.T, content string) (string, error) {
+	// Create a temporary file
+	tempFile, err := os.CreateTemp("", "s3-test-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %v", err)
+	}
+
+	// Write content to the file
+	if _, err := tempFile.Write([]byte(content)); err != nil {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return "", fmt.Errorf("failed to write to temp file: %v", err)
+	}
+
+	// Close the file
+	if err := tempFile.Close(); err != nil {
+		os.Remove(tempFile.Name())
+		return "", fmt.Errorf("failed to close temp file: %v", err)
+	}
+
+	return tempFile.Name(), nil
+}
+
+// cleanupTestFile removes a test file
 func cleanupTestFile(t *testing.T, filename string) {
 	if err := os.Remove(filename); err != nil {
 		t.Logf("Failed to remove test file: %v", err)
@@ -368,22 +392,141 @@ func setupTestEnvironmentWithBucket(t *testing.T, bucketName string) error {
 }
 
 func uploadTestFile(t *testing.T) error {
-	// Create a test file
+	// Create a test file in temp directory
 	content := fmt.Sprintf("Test content created at %s", time.Now().Format(time.RFC3339))
-	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+	tempFile, err := createTempFile(t, content)
+	if err != nil {
 		return fmt.Errorf("failed to create test file: %v", err)
 	}
-	defer cleanupTestFile(t, testFile)
+	defer cleanupTestFile(t, tempFile)
 
 	// Upload through gateway using mc put
 	cmd := exec.Command("mc", "put",
-		testFile,
-		"local-s3/"+testBucket+"/")
+		tempFile,
+		"local-s3/"+testBucket+"/"+testFile)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to upload file through gateway: %v", err)
 	}
 
 	return nil
+}
+
+func uploadTestFiles(t *testing.T) ([]string, error) {
+	// Create test files
+	content := fmt.Sprintf("Test content created at %s", time.Now().Format(time.RFC3339))
+
+	// Create and upload 100 files in parallel
+	const numFiles = 100
+	errChan := make(chan error, numFiles)
+	tempFiles := make([]string, numFiles)
+
+	// Create and upload files in parallel
+	for i := 0; i < numFiles; i++ {
+		// Create temp file
+		tempFile, err := createTempFile(t, content)
+		if err != nil {
+			// Clean up any already created temp files
+			for j := 0; j < i; j++ {
+				cleanupTestFile(t, tempFiles[j])
+			}
+			return nil, fmt.Errorf("failed to create test file %d: %v", i, err)
+		}
+		tempFiles[i] = tempFile
+
+		// Upload file in a goroutine
+		go func(fname string, index int) {
+			cmd := exec.Command("mc", "put",
+				fname,
+				"local-s3/"+testBucket+"/"+fmt.Sprintf("myfile%02d.txt", index))
+			if err := cmd.Run(); err != nil {
+				errChan <- fmt.Errorf("failed to upload file %d through gateway: %v", index, err)
+				return
+			}
+			errChan <- nil
+		}(tempFile, i)
+	}
+
+	// Wait for all uploads to complete and check for errors
+	for i := 0; i < numFiles; i++ {
+		if err := <-errChan; err != nil {
+			// Clean up all temp files on error
+			for _, f := range tempFiles {
+				cleanupTestFile(t, f)
+			}
+			return nil, err
+		}
+	}
+
+	return tempFiles, nil
+}
+
+func downloadTestFile(t *testing.T, sourceFile string) (string, error) {
+	// Create a temporary file for download
+	tempFile, err := os.CreateTemp("", "s3-download-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file for download: %v", err)
+	}
+	tempFile.Close() // Close it so mc can write to it
+
+	// Download the file using mc get
+	cmd := exec.Command("mc", "get",
+		"local-s3/"+testBucket+"/"+sourceFile,
+		tempFile.Name())
+	if err := cmd.Run(); err != nil {
+		os.Remove(tempFile.Name())
+		return "", fmt.Errorf("failed to download file through gateway: %v", err)
+	}
+
+	return tempFile.Name(), nil
+}
+
+func downloadTestFiles(t *testing.T) ([]string, error) {
+	// Download 100 files in parallel
+	const numFiles = 100
+	errChan := make(chan error, numFiles)
+	downloadedFiles := make([]string, numFiles)
+
+	// Download files in parallel
+	for i := 0; i < numFiles; i++ {
+		sourceFile := fmt.Sprintf("myfile%02d.txt", i)
+
+		// Create a temporary file for download
+		tempFile, err := os.CreateTemp("", "s3-download-*")
+		if err != nil {
+			// Clean up any already created temp files
+			for j := 0; j < i; j++ {
+				cleanupTestFile(t, downloadedFiles[j])
+			}
+			return nil, fmt.Errorf("failed to create temp file for download %d: %v", i, err)
+		}
+		tempFile.Close() // Close it so mc can write to it
+		downloadedFiles[i] = tempFile.Name()
+
+		// Download file in a goroutine
+		go func(src, dst string, index int) {
+			cmd := exec.Command("mc", "get",
+				"local-s3/"+testBucket+"/"+src,
+				dst)
+			if err := cmd.Run(); err != nil {
+				errChan <- fmt.Errorf("failed to download file %d through gateway: %v", index, err)
+				return
+			}
+			errChan <- nil
+		}(sourceFile, tempFile.Name(), i)
+	}
+
+	// Wait for all downloads to complete and check for errors
+	for i := 0; i < numFiles; i++ {
+		if err := <-errChan; err != nil {
+			// Clean up all temp files on error
+			for _, f := range downloadedFiles {
+				cleanupTestFile(t, f)
+			}
+			return nil, err
+		}
+	}
+
+	return downloadedFiles, nil
 }
 
 func verifyDownloadedFile(t *testing.T, filename string) error {

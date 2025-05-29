@@ -1,10 +1,10 @@
 package main
 
 import (
-	"os/exec"
+
 	//"strings"
+	"fmt"
 	"testing"
-	"time"
 )
 
 // testBucket and testFile are defined in test_utils.go
@@ -65,19 +65,11 @@ func TestObjectDownload(t *testing.T) {
 
 	// 3. Download the file through gateway
 	t.Log("Downloading test file through gateway...")
-	downloadedFile := "downloaded_" + testFile
-	defer cleanupTestFile(t, downloadedFile)
-
-	// Wait a moment to ensure file replication is complete
-	time.Sleep(2 * time.Second)
-
-	// Try to download the file using mc get
-	downloadCmd := exec.Command("mc", "get",
-		"local-s3/"+testBucket+"/"+testFile,
-		downloadedFile)
-	if err := downloadCmd.Run(); err != nil {
-		t.Fatalf("Failed to download file through gateway: %v", err)
+	downloadedFile, err := downloadTestFile(t, testFile)
+	if err != nil {
+		t.Fatalf("Failed to download test file: %v", err)
 	}
+	defer cleanupTestFile(t, downloadedFile)
 
 	// 4. Verify the downloaded file
 	t.Log("Verifying downloaded file...")
@@ -86,8 +78,7 @@ func TestObjectDownload(t *testing.T) {
 	}
 }
 
-/*
-func TestListBucket(t *testing.T) {
+func TestObjectsUploadInParallel(t *testing.T) {
 	// 1. Setup: Create or clean bucket
 	t.Log("Setting up test environment...")
 	if err := setupTestEnvironmentWithBucket(t, testBucket); err != nil {
@@ -97,51 +88,91 @@ func TestListBucket(t *testing.T) {
 		defer cleanupTestEnvironment(t)
 	}
 
-	// 2. Upload a test file
-	t.Log("Uploading test file through gateway...")
-	if err := uploadTestFile(t); err != nil {
-		t.Fatalf("Failed to upload test file: %v", err)
-	}
-
-	// Wait a moment to ensure file replication is complete
-	time.Sleep(2 * time.Second)
-
-	// 3. Verify files in first storage (MinIO)
-	t.Log("Verifying files in first storage...")
-	cmd := exec.Command("mc", "ls", "play/"+testBucket)
-	output, err := cmd.CombinedOutput()
+	// 2. Upload files through gateway in parallel
+	t.Log("Uploading test files through gateway in parallel...")
+	tempFiles, err := uploadTestFiles(t)
 	if err != nil {
-		t.Fatalf("Failed to list files in first storage: %v", err)
+		t.Fatalf("Failed to upload test files: %v", err)
 	}
-	firstStorageFiles := string(output)
-	if !strings.Contains(firstStorageFiles, testFile+".cypher.first") ||
-		!strings.Contains(firstStorageFiles, testFile+".rand.second") {
-		t.Errorf("Expected files not found in first storage. Got:\n%s", firstStorageFiles)
-	}
+	// Clean up temp files after test
+	defer func() {
+		for _, f := range tempFiles {
+			cleanupTestFile(t, f)
+		}
+	}()
 
-	// 4. Verify files in second storage (Scaleway)
-	t.Log("Verifying files in second storage...")
-	cmd = exec.Command("aws", "s3", "--endpoint-url", "https://s3.nl-ams.scw.cloud", "ls", "s3://"+testBucket)
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Failed to list files in second storage: %v", err)
-	}
-	secondStorageFiles := string(output)
-	if !strings.Contains(secondStorageFiles, testFile+".cypher.second") ||
-		!strings.Contains(secondStorageFiles, testFile+".rand.first") {
-		t.Errorf("Expected files not found in second storage. Got:\n%s", secondStorageFiles)
-	}
+	// 3. Verify files in storage systems
+	t.Log("Verifying files in storage systems...")
 
-	// 5. List files through gateway
-	t.Log("Listing files through gateway...")
-	cmd = exec.Command("mc", "ls", "local-s3/"+testBucket)
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Failed to list files through gateway: %v", err)
-	}
-	gatewayFiles := string(output)
-	if !strings.Contains(gatewayFiles, testFile) {
-		t.Errorf("Expected file not found in gateway listing. Got:\n%s", gatewayFiles)
+	// Verify all files
+	const numFiles = 100
+	for i := 0; i < numFiles; i++ {
+		filename := fmt.Sprintf("myfile%02d.txt", i)
+		firstErr, secondErr := verifyObjectsDirectly(t, *localMinioForTesting, testBucket, filename)
+		if firstErr != nil {
+			t.Errorf("Failed to verify file %s in first storage: %v", filename, firstErr)
+		}
+		if secondErr != nil {
+			t.Errorf("Failed to verify file %s in second storage: %v", filename, secondErr)
+		}
 	}
 }
-*/
+
+func TestObjectsDownloadInParallel(t *testing.T) {
+	// 1. Setup: Create or clean bucket
+	t.Log("Setting up test environment...")
+	if err := setupTestEnvironmentWithBucket(t, testBucket); err != nil {
+		t.Fatalf("Failed to setup test environment and create bucket: %v", err)
+	}
+	if !*noCleanup {
+		defer cleanupTestEnvironment(t)
+	}
+
+	// 2. Upload files through gateway in parallel first
+	t.Log("Uploading test files through gateway in parallel...")
+	tempFiles, err := uploadTestFiles(t)
+	if err != nil {
+		t.Fatalf("Failed to upload test files: %v", err)
+	}
+	// Clean up upload temp files
+	defer func() {
+		for _, f := range tempFiles {
+			cleanupTestFile(t, f)
+		}
+	}()
+
+	// 3. Verify files exist in storage systems before downloading
+	t.Log("Verifying files exist in storage systems...")
+	const numFiles = 100
+	for i := 0; i < numFiles; i++ {
+		filename := fmt.Sprintf("myfile%02d.txt", i)
+		firstErr, secondErr := verifyObjectsDirectly(t, *localMinioForTesting, testBucket, filename)
+		if firstErr != nil {
+			t.Fatalf("Failed to verify file %s in first storage: %v", filename, firstErr)
+		}
+		if secondErr != nil {
+			t.Fatalf("Failed to verify file %s in second storage: %v", filename, secondErr)
+		}
+	}
+
+	// 4. Download files through gateway in parallel
+	t.Log("Downloading test files through gateway in parallel...")
+	downloadedFiles, err := downloadTestFiles(t)
+	if err != nil {
+		t.Fatalf("Failed to download test files: %v", err)
+	}
+	// Clean up downloaded temp files
+	defer func() {
+		for _, f := range downloadedFiles {
+			cleanupTestFile(t, f)
+		}
+	}()
+
+	// 5. Verify downloaded files
+	t.Log("Verifying downloaded files...")
+	for _, filename := range downloadedFiles {
+		if err := verifyDownloadedFile(t, filename); err != nil {
+			t.Errorf("Failed to verify downloaded file %s: %v", filename, err)
+		}
+	}
+}
